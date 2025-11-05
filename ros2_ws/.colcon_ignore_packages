@@ -1,0 +1,3 @@
+# Ignore ROS1 catkin_ws during ROS2 builds
+# This file tells colcon to skip certain directories
+

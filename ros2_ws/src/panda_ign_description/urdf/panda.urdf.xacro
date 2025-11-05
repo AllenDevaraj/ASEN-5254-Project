@@ -1,0 +1,110 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro" name="panda">
+  
+  <xacro:arg name="use_sim" default="true"/>
+  <xacro:arg name="use_fake_hardware" default="false"/>
+  
+  <!-- Include the panda arm from moveit_resources -->
+  <xacro:include filename="$(find moveit_resources_panda_description)/urdf/panda.urdf"/>
+  
+  <!-- ros2_control using Ignition Gazebo system -->
+  <ros2_control name="panda_arm" type="system">
+    <hardware>
+      <xacro:if value="$(arg use_sim)">
+        <plugin>gz_ros2_control/GazeboSimSystem</plugin>
+      </xacro:if>
+      <xacro:if value="$(arg use_fake_hardware)">
+        <plugin>mock_components/GenericSystem</plugin>
+      </xacro:if>
+    </hardware>
+    
+    <!-- Panda arm joints -->
+    <joint name="panda_joint1">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_joint2">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">-0.785</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_joint3">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_joint4">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">-2.356</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_joint5">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_joint6">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">1.57</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_joint7">
+      <command_interface name="position"/>
+      <command_interface name="velocity"/>
+      <state_interface name="position">
+        <param name="initial_value">0.785</param>
+      </state_interface>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <!-- Gripper fingers -->
+    <joint name="panda_finger_joint1">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+    </joint>
+    
+    <joint name="panda_finger_joint2">
+      <command_interface name="position"/>
+      <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <param name="mimic">panda_finger_joint1</param>
+      <param name="multiplier">1</param>
+    </joint>
+  </ros2_control>
+  
+  <!-- Gazebo Harmonic plugins -->
+  <gazebo>
+    <!-- ros2_control plugin for Gazebo Harmonic -->
+    <plugin filename="libgz_ros2_control-system.so" name="gz_ros2_control::GazeboSimROS2ControlPlugin">
+      <parameters>$(find panda_ign_description)/config/panda_controllers.yaml</parameters>
+    </plugin>
+  </gazebo>
+
+</robot>
+
