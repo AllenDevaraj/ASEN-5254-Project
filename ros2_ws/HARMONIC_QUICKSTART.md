@@ -265,3 +265,4 @@ Then we add MoveIt2 + application nodes (Phase 2).
 
 Then: `colcon build && ros2 launch panda_ign_description panda_ignition_demo.launch.py`
 
+

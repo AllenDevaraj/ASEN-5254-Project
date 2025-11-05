@@ -116,3 +116,4 @@ ros2 launch panda_ign_description panda_ignition_demo.launch.py
 
 **Your understanding is spot-on! Just exit venv, install catkin_pkg, and build!** 🎉
 
+
