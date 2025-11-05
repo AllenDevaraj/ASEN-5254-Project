@@ -126,62 +126,7 @@
       </link>
     </model>
     
-    <!-- Red bin -->
-    <model name="bin_red">
-      <pose>-0.5 -0.27 0.11 0 0 0</pose>
-      <static>true</static>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.15 0.15 0.05</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>1 0 0 0.5</ambient>
-            <diffuse>1 0 0 0.5</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-    
-    <!-- Green bin -->
-    <model name="bin_green">
-      <pose>-0.5 0 0.11 0 0 0</pose>
-      <static>true</static>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.15 0.15 0.05</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0 1 0 0.5</ambient>
-            <diffuse>0 1 0 0.5</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
-    
-    <!-- Blue bin -->
-    <model name="bin_blue">
-      <pose>-0.5 0.27 0.11 0 0 0</pose>
-      <static>true</static>
-      <link name="link">
-        <visual name="visual">
-          <geometry>
-            <box>
-              <size>0.15 0.15 0.05</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0 0 1 0.5</ambient>
-            <diffuse>0 0 1 0.5</diffuse>
-          </material>
-        </visual>
-      </link>
-    </model>
+    <!-- Colored bins removed per user request -->
     
     <!-- Red blocks -->
     <model name="block_red_1">
@@ -250,6 +195,7 @@
     </model>
     
     <!-- Solid Cuboid for Insertion Task (Orange Peg) -->
+    <!-- Dimensions: 80mm x 30mm x 30mm -->
     <model name="insertion_peg">
       <pose>0.6 -0.4 0.25 0 0 0</pose>
       <link name="link">
@@ -264,14 +210,14 @@
         <collision name="collision">
           <geometry>
             <box>
-              <size>0.08 0.05 0.05</size>
+              <size>0.08 0.03 0.03</size>
             </box>
           </geometry>
         </collision>
         <visual name="visual">
           <geometry>
             <box>
-              <size>0.08 0.05 0.05</size>
+              <size>0.08 0.03 0.03</size>
             </box>
           </geometry>
           <material>
@@ -284,9 +230,10 @@
     </model>
     
     <!-- Hollow Receptacle for Insertion Task (Blue Box) -->
-    <!-- External dimensions: 92x62x62mm with 5mm walls -->
-    <!-- Internal cavity: 82x52x52mm (2mm clearance on each side) -->
-    <!-- Oriented horizontally with opening facing the peg for side-to-side insertion -->
+    <!-- Outer dimensions: 80mm x 50mm x 50mm -->
+    <!-- Inner cavity: 80mm x 30.5mm x 30.5mm -->
+    <!-- Wall thickness: 9.75mm on each side -->
+    <!-- Both ends open for insertion -->
     <model name="insertion_receptacle">
       <pose>0.9 -0.4 0.231 0 -1.5708 0</pose>
       <static>true</static>
@@ -300,20 +247,20 @@
           </inertia>
         </inertial>
         
-        <!-- Bottom -->
+        <!-- Bottom wall: 80mm x 50mm x 9.75mm -->
         <collision name="bottom">
-          <pose>0 0 -0.0285 0 0 0</pose>
+          <pose>0 0 -0.020125 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.092 0.062 0.005</size>
+              <size>0.08 0.05 0.00975</size>
             </box>
           </geometry>
         </collision>
         <visual name="bottom_visual">
-          <pose>0 0 -0.0285 0 0 0</pose>
+          <pose>0 0 -0.020125 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.092 0.062 0.005</size>
+              <size>0.08 0.05 0.00975</size>
             </box>
           </geometry>
           <material>
@@ -322,64 +269,26 @@
           </material>
         </visual>
         
-        <!-- Front wall -->
-        <collision name="front_wall">
-          <pose>0.0435 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.005 0.062 0.062</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="front_wall_visual">
-          <pose>0.0435 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.005 0.062 0.062</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.2 0.2 0.8 1</ambient>
-            <diffuse>0.3 0.3 0.9 1</diffuse>
-          </material>
-        </visual>
+        <!-- Front wall (open end - removed for insertion) -->
+        <!-- No front wall - open for insertion -->
         
-        <!-- Back wall -->
-        <collision name="back_wall">
-          <pose>-0.0435 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.005 0.062 0.062</size>
-            </box>
-          </geometry>
-        </collision>
-        <visual name="back_wall_visual">
-          <pose>-0.0435 0 0 0 0 0</pose>
-          <geometry>
-            <box>
-              <size>0.005 0.062 0.062</size>
-            </box>
-          </geometry>
-          <material>
-            <ambient>0.2 0.2 0.8 1</ambient>
-            <diffuse>0.3 0.3 0.9 1</diffuse>
-          </material>
-        </visual>
+        <!-- Back wall (open end - removed for insertion) -->
+        <!-- No back wall - both ends open -->
         
-        <!-- Left wall -->
+        <!-- Left wall: 80mm x 9.75mm x 50mm -->
         <collision name="left_wall">
-          <pose>0 0.0285 0 0 0 0</pose>
+          <pose>0 0.020125 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.082 0.005 0.062</size>
+              <size>0.08 0.00975 0.05</size>
             </box>
           </geometry>
         </collision>
         <visual name="left_wall_visual">
-          <pose>0 0.0285 0 0 0 0</pose>
+          <pose>0 0.020125 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.082 0.005 0.062</size>
+              <size>0.08 0.00975 0.05</size>
             </box>
           </geometry>
           <material>
@@ -388,20 +297,42 @@
           </material>
         </visual>
         
-        <!-- Right wall -->
+        <!-- Right wall: 80mm x 9.75mm x 50mm -->
         <collision name="right_wall">
-          <pose>0 -0.0285 0 0 0 0</pose>
+          <pose>0 -0.020125 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.082 0.005 0.062</size>
+              <size>0.08 0.00975 0.05</size>
             </box>
           </geometry>
         </collision>
         <visual name="right_wall_visual">
-          <pose>0 -0.0285 0 0 0 0</pose>
+          <pose>0 -0.020125 0 0 0 0</pose>
           <geometry>
             <box>
-              <size>0.082 0.005 0.062</size>
+              <size>0.08 0.00975 0.05</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.2 0.2 0.8 1</ambient>
+            <diffuse>0.3 0.3 0.9 1</diffuse>
+          </material>
+        </visual>
+        
+        <!-- Top wall: 80mm x 50mm x 9.75mm -->
+        <collision name="top_wall">
+          <pose>0 0 0.020125 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.05 0.00975</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="top_wall_visual">
+          <pose>0 0 0.020125 0 0 0</pose>
+          <geometry>
+            <box>
+              <size>0.08 0.05 0.00975</size>
             </box>
           </geometry>
           <material>

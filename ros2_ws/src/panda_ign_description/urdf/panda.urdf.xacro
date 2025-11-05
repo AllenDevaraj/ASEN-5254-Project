@@ -5,7 +5,7 @@
   <xacro:arg name="use_fake_hardware" default="false"/>
   
   <!-- Include the panda arm from moveit_resources -->
-  <xacro:include filename="$(find moveit_resources_panda_description)/urdf/panda.urdf"/>
+  <xacro:include filename="$(find moveit_resources_panda_moveit_config)/config/panda.urdf.xacro"/>
   
   <!-- ros2_control using Ignition Gazebo system -->
   <ros2_control name="panda_arm" type="system">
