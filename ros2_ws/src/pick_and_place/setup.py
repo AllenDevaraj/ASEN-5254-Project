@@ -40,7 +40,10 @@ setup(
         'console_scripts': [
             'controller = pick_and_place.controller:main',
             'panda_ik_gui = pick_and_place.gui_end_effector:main',
+            'panda1_ik_gui = pick_and_place.gui_end_effector:main',
+            'panda2_ik_gui = pick_and_place.gui_end_effector:main',
         ],
     },
+
 )
 
