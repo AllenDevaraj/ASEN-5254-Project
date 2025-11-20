@@ -144,7 +144,7 @@ def generate_launch_description():
     
     # Unified dual-arm GUI
     dual_arm_gui = ExecuteProcess(
-        cmd=['ros2', 'run', 'pick_and_place', 'dual_arm_gui'],
+        cmd=['python3', '-m', 'pick_and_place.dual_arm_gui'],
         output='screen',
         condition=IfCondition(use_gui)
     )

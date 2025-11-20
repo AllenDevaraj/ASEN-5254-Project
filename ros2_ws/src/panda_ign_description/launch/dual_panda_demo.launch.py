@@ -241,31 +241,59 @@ def generate_launch_description():
         bridge_camera_depth,
         
         # Start controllers for Panda 1 after robot is spawned
-        # Use TimerAction with longer delay to ensure controller manager is fully initialized
-        TimerAction(
-            period=8.0,  # Wait for robot spawn and controller manager to fully initialize
-            actions=[joint_state_broadcaster_spawner_panda1]
+        # Use OnProcessExit to ensure proper sequencing and avoid race conditions
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=spawn_robot1,
+                on_exit=[
+                    TimerAction(
+                        period=3.0,  # Give controller manager time to initialize
+                        actions=[joint_state_broadcaster_spawner_panda1]
+                    )
+                ]
+            )
         ),
         
-        TimerAction(
-            period=9.0,  # Wait a bit more after joint_state_broadcaster
-            actions=[
-                arm_controller_spawner_panda1,
-                gripper_controller_spawner_panda1,
-            ]
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=joint_state_broadcaster_spawner_panda1,
+                on_exit=[
+                    TimerAction(
+                        period=2.0,  # Wait for joint_state_broadcaster to fully configure
+                        actions=[
+                            arm_controller_spawner_panda1,
+                            gripper_controller_spawner_panda1,
+                        ]
+                    )
+                ]
+            )
         ),
         
         # Start controllers for Panda 2 after robot is spawned
-        TimerAction(
-            period=9.0,  # Wait for robot spawn and controller manager to fully initialize
-            actions=[joint_state_broadcaster_spawner_panda2]
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=spawn_robot2,
+                on_exit=[
+                    TimerAction(
+                        period=3.0,  # Give controller manager time to initialize
+                        actions=[joint_state_broadcaster_spawner_panda2]
+                    )
+                ]
+            )
         ),
         
-        TimerAction(
-            period=10.0,  # Wait a bit more after joint_state_broadcaster
-            actions=[
-                arm_controller_spawner_panda2,
-                gripper_controller_spawner_panda2,
-            ]
+        RegisterEventHandler(
+            OnProcessExit(
+                target_action=joint_state_broadcaster_spawner_panda2,
+                on_exit=[
+                    TimerAction(
+                        period=2.0,  # Wait for joint_state_broadcaster to fully configure
+                        actions=[
+                            arm_controller_spawner_panda2,
+                            gripper_controller_spawner_panda2,
+                        ]
+                    )
+                ]
+            )
         ),
     ])
