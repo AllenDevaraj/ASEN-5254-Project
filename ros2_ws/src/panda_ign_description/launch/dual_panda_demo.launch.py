@@ -29,17 +29,29 @@ def generate_launch_description():
     # Paths
     world_file = os.path.join(panda_ign_desc_dir, 'worlds', 'pick_and_place_ign.sdf')
     urdf_file = os.path.join(panda_ign_desc_dir, 'urdf', 'panda_sim.urdf.xacro')
-    controllers_file = os.path.join(panda_ign_desc_dir, 'config', 'panda_controllers.yaml')
+    # Use the dual controllers config with wildcards
+    controllers_file = os.path.join(panda_ign_desc_dir, 'config', 'panda_dual_controllers.yaml')
     
     # Launch arguments
     use_sim_time = LaunchConfiguration('use_sim_time', default='true')
     
-    # Process robot description
-    robot_description_content = Command([
-        'xacro ', urdf_file
+    # Process robot description for Panda 1 (with namespace)
+    robot_description_panda1_content = Command([
+        'xacro ', urdf_file, 
+        ' namespace:=panda1',
+        ' controller_config:=', controllers_file
     ])
     
-    robot_description = {'robot_description': robot_description_content}
+    robot_description_panda1 = {'robot_description': robot_description_panda1_content}
+    
+    # Process robot description for Panda 2 (with namespace)
+    robot_description_panda2_content = Command([
+        'xacro ', urdf_file, 
+        ' namespace:=panda2',
+        ' controller_config:=', controllers_file
+    ])
+    
+    robot_description_panda2 = {'robot_description': robot_description_panda2_content}
     
     # Start Ignition Gazebo
     ignition_gazebo = IncludeLaunchDescription(
@@ -62,7 +74,7 @@ def generate_launch_description():
         executable='create',
         arguments=[
             '-name', 'panda1',
-            '-topic', 'robot_description',
+            '-topic', '/panda1/robot_description',
             '-x', '0.0',
             '-y', '0.3',
             '-z', '0.0',
@@ -77,7 +89,7 @@ def generate_launch_description():
         executable='create',
         arguments=[
             '-name', 'panda2',
-            '-topic', 'robot_description',
+            '-topic', '/panda2/robot_description',
             '-x', '1.4',
             '-y', '-0.3',
             '-z', '0.0',
@@ -86,38 +98,87 @@ def generate_launch_description():
         output='screen'
     )
     
-    # Robot state publisher
-    robot_state_publisher = Node(
+    # Robot state publisher for Panda 1
+    robot_state_publisher_panda1 = Node(
         package='robot_state_publisher',
         executable='robot_state_publisher',
+        namespace='panda1',
         output='screen',
         parameters=[
-            robot_description,
+            robot_description_panda1,
             {'use_sim_time': use_sim_time}
         ]
     )
     
-    # Joint state broadcaster spawner
-    joint_state_broadcaster_spawner = Node(
+    # Robot state publisher for Panda 2
+    robot_state_publisher_panda2 = Node(
+        package='robot_state_publisher',
+        executable='robot_state_publisher',
+        namespace='panda2',
+        output='screen',
+        parameters=[
+            robot_description_panda2,
+            {'use_sim_time': use_sim_time}
+        ]
+    )
+    
+    # Joint state broadcaster spawner for Panda 1
+    joint_state_broadcaster_spawner_panda1 = Node(
         package='controller_manager',
         executable='spawner',
-        arguments=['joint_state_broadcaster', '--controller-manager', '/controller_manager'],
+        namespace='panda1',
+        arguments=['joint_state_broadcaster', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
+        parameters=[controllers_file],
         output='screen'
     )
     
-    # Arm controller spawner
-    arm_controller_spawner = Node(
+    # Arm controller spawner for Panda 1
+    arm_controller_spawner_panda1 = Node(
         package='controller_manager',
         executable='spawner',
-        arguments=['panda_arm_controller', '--controller-manager', '/controller_manager'],
+        namespace='panda1',
+        arguments=['panda_arm_controller', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
+        parameters=[controllers_file],
         output='screen'
     )
     
-    # Gripper controller spawner
-    gripper_controller_spawner = Node(
+    # Gripper controller spawner for Panda 1
+    gripper_controller_spawner_panda1 = Node(
         package='controller_manager',
         executable='spawner',
-        arguments=['panda_gripper_controller', '--controller-manager', '/controller_manager'],
+        namespace='panda1',
+        arguments=['panda_gripper_controller', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
+        parameters=[controllers_file],
+        output='screen'
+    )
+    
+    # Joint state broadcaster spawner for Panda 2
+    joint_state_broadcaster_spawner_panda2 = Node(
+        package='controller_manager',
+        executable='spawner',
+        namespace='panda2',
+        arguments=['joint_state_broadcaster', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
+        parameters=[controllers_file],
+        output='screen'
+    )
+    
+    # Arm controller spawner for Panda 2
+    arm_controller_spawner_panda2 = Node(
+        package='controller_manager',
+        executable='spawner',
+        namespace='panda2',
+        arguments=['panda_arm_controller', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
+        parameters=[controllers_file],
+        output='screen'
+    )
+    
+    # Gripper controller spawner for Panda 2
+    gripper_controller_spawner_panda2 = Node(
+        package='controller_manager',
+        executable='spawner',
+        namespace='panda2',
+        arguments=['panda_gripper_controller', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
+        parameters=[controllers_file],
         output='screen'
     )
     
@@ -159,8 +220,9 @@ def generate_launch_description():
         # Start Ignition Gazebo
         ignition_gazebo,
         
-        # Robot state publisher (needs to be early for spawn to work)
-        robot_state_publisher,
+        # Robot state publishers (needs to be early for spawn to work)
+        robot_state_publisher_panda1,
+        robot_state_publisher_panda2,
         
         # Spawn BOTH robots after a delay
         TimerAction(
@@ -178,23 +240,32 @@ def generate_launch_description():
         bridge_camera_rgb,
         bridge_camera_depth,
         
-        # Start controllers after robot is spawned
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=spawn_robot1,
-                on_exit=[
-                    joint_state_broadcaster_spawner,
-                ]
-            )
+        # Start controllers for Panda 1 after robot is spawned
+        # Use TimerAction with longer delay to ensure controller manager is fully initialized
+        TimerAction(
+            period=8.0,  # Wait for robot spawn and controller manager to fully initialize
+            actions=[joint_state_broadcaster_spawner_panda1]
         ),
         
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=joint_state_broadcaster_spawner,
-                on_exit=[
-                    arm_controller_spawner,
-                    gripper_controller_spawner,
-                ]
-            )
+        TimerAction(
+            period=9.0,  # Wait a bit more after joint_state_broadcaster
+            actions=[
+                arm_controller_spawner_panda1,
+                gripper_controller_spawner_panda1,
+            ]
+        ),
+        
+        # Start controllers for Panda 2 after robot is spawned
+        TimerAction(
+            period=9.0,  # Wait for robot spawn and controller manager to fully initialize
+            actions=[joint_state_broadcaster_spawner_panda2]
+        ),
+        
+        TimerAction(
+            period=10.0,  # Wait a bit more after joint_state_broadcaster
+            actions=[
+                arm_controller_spawner_panda2,
+                gripper_controller_spawner_panda2,
+            ]
         ),
     ])

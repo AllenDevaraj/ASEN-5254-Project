@@ -27,7 +27,6 @@ setup(
         (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
         (os.path.join('share', package_name, 'worlds'), glob('worlds/*.world')),
-        (os.path.join('lib', package_name), glob('scripts/*')),
     ] + model_files,
     install_requires=['setuptools'],
     zip_safe=True,
@@ -40,8 +39,8 @@ setup(
         'console_scripts': [
             'controller = pick_and_place.controller:main',
             'panda_ik_gui = pick_and_place.gui_end_effector:main',
-            'panda1_ik_gui = pick_and_place.gui_end_effector:main',
-            'panda2_ik_gui = pick_and_place.gui_end_effector:main',
+            'panda1_ik_gui = pick_and_place.gui_end_effector:panda1_main',
+            'panda2_ik_gui = pick_and_place.gui_end_effector:panda2_main',
         ],
     },
 

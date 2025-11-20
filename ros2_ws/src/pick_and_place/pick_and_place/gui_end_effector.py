@@ -2,6 +2,7 @@
 
 """Tkinter GUI to command Panda end-effector poses via MoveIt's IK service."""
 
+import argparse
 import math
 import threading
 import tkinter as tk
@@ -23,8 +24,17 @@ from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 class PandaIKNode(Node):
     """ROS2 node handling IK requests and trajectory execution."""
 
-    def __init__(self) -> None:
-        super().__init__('panda_ik_gui_node')
+    def __init__(
+        self,
+        namespace: str = '',
+        base_frame: str = 'panda_link0',
+        move_group: str = 'panda_arm',
+    ) -> None:
+        self.namespace = namespace.strip('/')
+        node_name = f'{self.namespace}_panda_ik_gui_node' if self.namespace else 'panda_ik_gui_node'
+        super().__init__(node_name)
+        self.base_frame = base_frame
+        self.move_group = move_group
 
         self.joint_names: List[str] = [
             'panda_joint1',
@@ -39,11 +49,11 @@ class PandaIKNode(Node):
 
         self.joint_pub = self.create_publisher(
             JointTrajectory,
-            '/panda_arm_controller/joint_trajectory',
+            self._ns_topic('panda_arm_controller/joint_trajectory'),
             10,
         )
 
-        self.ik_client = self.create_client(GetPositionIK, '/compute_ik')
+        self.ik_client = self.create_client(GetPositionIK, self._ns_topic('compute_ik'))
         self.get_logger().info('Waiting for /compute_ik service...')
         if not self.ik_client.wait_for_service(timeout_sec=10.0):
             self.get_logger().error('MoveIt compute_ik service not available.')
@@ -51,22 +61,29 @@ class PandaIKNode(Node):
         self.gripper_client = ActionClient(
             self,
             GripperCommand,
-            '/panda_gripper_controller/gripper_cmd',
+            self._ns_topic('panda_gripper_controller/gripper_cmd'),
         )
         self.get_logger().info('Waiting for gripper action server...')
         self.gripper_client.wait_for_server(timeout_sec=5.0)
+
+    # ------------------------------------------------------------------
+    def _ns_topic(self, relative: str) -> str:
+        relative = relative.lstrip('/')
+        if self.namespace:
+            return f'/{self.namespace}/{relative}'
+        return f'/{relative}'
 
     # ------------------------------------------------------------------
     # Motion helpers
     # ------------------------------------------------------------------
     def compute_ik(self, pose: Pose) -> List[float]:
         request = GetPositionIK.Request()
-        request.ik_request.group_name = 'panda_arm'
+        request.ik_request.group_name = self.move_group
         request.ik_request.avoid_collisions = True
         request.ik_request.timeout = Duration(seconds=2.0).to_msg()
 
         pose_stamped = PoseStamped()
-        pose_stamped.header.frame_id = 'panda_link0'
+        pose_stamped.header.frame_id = self.base_frame
         pose_stamped.pose = pose
         request.ik_request.pose_stamped = pose_stamped
 
@@ -126,12 +143,19 @@ class PandaIKNode(Node):
 class PandaIKGUI:
     """Tkinter front-end wrapping PandaIKNode."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        namespace: str = '',
+        base_frame: str = 'panda_link0',
+        move_group: str = 'panda_arm',
+    ) -> None:
         rclpy.init()
-        self.node = PandaIKNode()
+        self.node = PandaIKNode(namespace=namespace, base_frame=base_frame, move_group=move_group)
+        self.namespace = namespace.strip('/')
 
         self.root = tk.Tk()
-        self.root.title('Panda End-Effector IK Demo')
+        title_suffix = f' ({self.namespace})' if self.namespace else ''
+        self.root.title(f'Panda End-Effector IK Demo{title_suffix}')
         self.root.protocol('WM_DELETE_WINDOW', self.shutdown)
 
         self.status_var = tk.StringVar(value='Ready')
@@ -263,12 +287,30 @@ class PandaIKGUI:
         self.root.destroy()
 
 
-def main() -> None:
-    gui = PandaIKGUI()
+def run_gui(namespace: str = '', base_frame: str = 'panda_link0', move_group: str = 'panda_arm') -> None:
+    gui = PandaIKGUI(namespace=namespace, base_frame=base_frame, move_group=move_group)
     try:
         gui.run()
     except KeyboardInterrupt:
         gui.shutdown()
+
+
+def main(argv: List[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description='Panda end-effector IK GUI')
+    parser.add_argument('-n', '--namespace', default='', help='ROS namespace for this Panda robot')
+    parser.add_argument('--base-frame', default='panda_link0', help='Base frame used for IK requests')
+    parser.add_argument('--planning-group', default='panda_arm', help='MoveIt planning group name')
+    args = parser.parse_args(args=argv)
+
+    run_gui(namespace=args.namespace, base_frame=args.base_frame, move_group=args.planning_group)
+
+
+def panda1_main() -> None:
+    run_gui(namespace='panda1')
+
+
+def panda2_main() -> None:
+    run_gui(namespace='panda2')
 
 
 if __name__ == '__main__':
