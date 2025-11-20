@@ -53,10 +53,11 @@ class PandaIKNode(Node):
             10,
         )
 
-        self.ik_client = self.create_client(GetPositionIK, self._ns_topic('compute_ik'))
-        self.get_logger().info('Waiting for /compute_ik service...')
+        ik_service_name = self._ns_topic('compute_ik')
+        self.ik_client = self.create_client(GetPositionIK, ik_service_name)
+        self.get_logger().info(f'Waiting for {ik_service_name} service...')
         if not self.ik_client.wait_for_service(timeout_sec=10.0):
-            self.get_logger().error('MoveIt compute_ik service not available.')
+            self.get_logger().error(f'MoveIt {ik_service_name} service not available.')
 
         self.gripper_client = ActionClient(
             self,

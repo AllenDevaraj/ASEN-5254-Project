@@ -53,6 +53,8 @@ def generate_launch_description():
     moveit_share = get_package_share_directory('moveit_resources_panda_moveit_config')
     
     # Build MoveIt config for Panda 1
+    # Note: We use the robot_description from the simulation (published by robot_state_publisher)
+    # The robot_description parameter will be remapped to use the simulation's URDF
     moveit_config_panda1 = (
         MoveItConfigsBuilder('moveit_resources_panda')
         .robot_description(
@@ -81,6 +83,7 @@ def generate_launch_description():
     )
     
     # MoveIt move_group node for Panda 1
+    # Remap robot_description to use the one from simulation
     move_group_panda1 = Node(
         package='moveit_ros_move_group',
         executable='move_group',
@@ -92,12 +95,16 @@ def generate_launch_description():
             {'use_sim_time': True}
         ],
         remappings=[
-            ('/panda1/joint_states', '/panda1/joint_states'),
-            ('/panda1/robot_description', '/panda1/robot_description'),
+            ('joint_states', '/panda1/joint_states'),
+            # Remap robot_description to use the simulation's URDF
+            ('robot_description', '/panda1/robot_description'),
+            # Ensure compute_ik service is in the namespace
+            ('compute_ik', '/panda1/compute_ik'),
         ]
     )
     
     # MoveIt move_group node for Panda 2
+    # Remap robot_description to use the one from simulation
     move_group_panda2 = Node(
         package='moveit_ros_move_group',
         executable='move_group',
@@ -109,8 +116,11 @@ def generate_launch_description():
             {'use_sim_time': True}
         ],
         remappings=[
-            ('/panda2/joint_states', '/panda2/joint_states'),
-            ('/panda2/robot_description', '/panda2/robot_description'),
+            ('joint_states', '/panda2/joint_states'),
+            # Remap robot_description to use the simulation's URDF
+            ('robot_description', '/panda2/robot_description'),
+            # Ensure compute_ik service is in the namespace
+            ('compute_ik', '/panda2/compute_ik'),
         ]
     )
     
