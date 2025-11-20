@@ -129,7 +129,7 @@
     <!-- Colored bins removed per user request -->
     
     <!-- Red blocks -->
-    <model name="block_red_1">
+    <model name="red_block">
       <pose>0.4 -0.22 0.225 0 0 0</pose>
       <link name="link">
         <inertial>
@@ -162,7 +162,7 @@
     </model>
     
     <!-- Green block -->
-    <model name="block_green_1">
+    <model name="green_block">
       <pose>0.45 0.0 0.225 0 0 0</pose>
       <link name="link">
         <inertial>
@@ -196,7 +196,7 @@
     
     <!-- Solid Cuboid for Insertion Task (Red Peg) -->
     <!-- Dimensions: 80mm x 30mm x 30mm -->
-    <model name="insertion_peg">
+    <model name="red_solid">
       <pose>0.6 -0.4 0.25 0 0 0</pose>
       <link name="link">
         <inertial>
@@ -234,7 +234,7 @@
     <!-- Inner cavity: 80mm x 30.5mm x 30.5mm -->
     <!-- Wall thickness: 9.75mm on each side -->
     <!-- Both ends open for insertion -->
-    <model name="insertion_receptacle">
+    <model name="red_hollow">
       <pose>0.9 -0.4 0.231 0 -1.5708 0</pose>
       <static>true</static>
       <link name="link">
@@ -345,7 +345,7 @@
 
     <!-- Solid Cuboid for Insertion Task (Green Peg) -->
     <!-- Dimensions: 80mm x 30mm x 30mm -->
-    <model name="insertion_peg_green">
+    <model name="green_solid">
       <pose>0.6 0.0 0.25 0 0 0</pose>
       <link name="link">
         <inertial>
@@ -380,7 +380,7 @@
 
     <!-- Hollow Receptacle for Insertion Task (Green Box) -->
     <!-- Outer: 80mm x 50mm x 50mm, Inner: 80mm x 30.5mm x 30.5mm -->
-    <model name="insertion_receptacle_green">
+    <model name="green_hollow">
       <pose>0.9 0.0 0.231 0 -1.5708 0</pose>
       <static>true</static>
       <link name="link">

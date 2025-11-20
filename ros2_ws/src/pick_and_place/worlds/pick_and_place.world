@@ -48,7 +48,7 @@
     <include>
       <uri>model://pick_and_place/models/block_red</uri>
       <pose>0.4 -0.22 0.115 0 0 0</pose>
-      <name>block_red_1</name>
+      <name>red_block</name>
     </include>
 
     <include>
@@ -66,7 +66,7 @@
     <include>
       <uri>model://pick_and_place/models/block_green</uri>
       <pose>0.45 0.0 0.115 0 0 0</pose>
-      <name>block_green_1</name>
+      <name>green_block</name>
     </include>
 
     <!-- Camera -->
