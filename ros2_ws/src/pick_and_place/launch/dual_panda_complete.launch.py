@@ -142,16 +142,9 @@ def generate_launch_description():
         condition=IfCondition(use_rviz)
     )
     
-    # GUI for Panda 1
-    gui_panda1 = ExecuteProcess(
-        cmd=['ros2', 'run', 'pick_and_place', 'panda1_ik_gui'],
-        output='screen',
-        condition=IfCondition(use_gui)
-    )
-    
-    # GUI for Panda 2
-    gui_panda2 = ExecuteProcess(
-        cmd=['ros2', 'run', 'pick_and_place', 'panda2_ik_gui'],
+    # Unified dual-arm GUI
+    dual_arm_gui = ExecuteProcess(
+        cmd=['ros2', 'run', 'pick_and_place', 'dual_arm_gui'],
         output='screen',
         condition=IfCondition(use_gui)
     )
@@ -179,13 +172,10 @@ def generate_launch_description():
             actions=[rviz_node]
         ),
         
-        # GUIs (start after MoveIt is ready)
+        # Dual-arm GUI (start after MoveIt is ready)
         TimerAction(
             period=12.0,
-            actions=[
-                gui_panda1,
-                gui_panda2,
-            ]
+            actions=[dual_arm_gui]
         ),
     ])
 
