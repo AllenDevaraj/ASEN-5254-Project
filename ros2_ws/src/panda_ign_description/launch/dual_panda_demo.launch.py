@@ -76,7 +76,7 @@ def generate_launch_description():
             '-name', 'panda1',
             '-topic', '/panda1/robot_description',
             '-x', '0.0',
-            '-y', '0.3',
+            '-y', '0.15',
             '-z', '0.0',
             '-Y', '0.0',  # Face forward (positive X direction)
         ],
@@ -91,7 +91,7 @@ def generate_launch_description():
             '-name', 'panda2',
             '-topic', '/panda2/robot_description',
             '-x', '1.4',
-            '-y', '-0.3',
+            '-y', '-0.15',
             '-z', '0.0',
             '-Y', '3.14159',  # Face backward (negative X direction) toward panda1
         ],
