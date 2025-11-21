@@ -15,7 +15,10 @@ from rclpy.action import ActionClient
 
 from control_msgs.action import GripperCommand
 from geometry_msgs.msg import Pose, PoseStamped
-from moveit_msgs.srv import GetPositionIK
+from moveit_msgs.msg import PlanningScene, CollisionObject, AttachedCollisionObject
+from moveit_msgs.srv import GetPositionIK, GetCartesianPath
+from shape_msgs.msg import SolidPrimitive
+from std_msgs.msg import Header
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 
 
@@ -24,6 +27,12 @@ class DualPandaIKNode(Node):
 
     def __init__(self) -> None:
         super().__init__('dual_panda_ik_gui_node')
+        
+        # Robot world poses (from launch file)
+        self.robot_poses = {
+            'panda1': {'x': 0.0, 'y': 0.15, 'z': 0.0, 'yaw': 0.0},
+            'panda2': {'x': 1.4, 'y': -0.15, 'z': 0.0, 'yaw': math.pi}
+        }
         
         self.joint_names: List[str] = [
             'panda_joint1',
@@ -34,6 +43,9 @@ class DualPandaIKNode(Node):
             'panda_joint6',
             'panda_joint7',
         ]
+        # Gripper length offset (wrist to fingertip center)
+        # When grasping top-down, we must add this to the target Z
+        self.gripper_length = 0.11  # 11cm
         self.neutral_pose: List[float] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]
 
         # Panda 1 publishers and clients
@@ -72,6 +84,118 @@ class DualPandaIKNode(Node):
         self.get_logger().info('Waiting for gripper action servers...')
         self.gripper_client_panda1.wait_for_server(timeout_sec=5.0)
         self.gripper_client_panda2.wait_for_server(timeout_sec=5.0)
+        
+        # Planning scene publishers
+        self.planning_scene_pub_panda1 = self.create_publisher(
+            PlanningScene,
+            '/panda1/monitored_planning_scene',
+            10
+        )
+        self.planning_scene_pub_panda2 = self.create_publisher(
+            PlanningScene,
+            '/panda2/monitored_planning_scene',
+            10
+        )
+        
+        # Cartesian path clients
+        self.cartesian_path_client_panda1 = self.create_client(
+            GetCartesianPath,
+            '/panda1/compute_cartesian_path'
+        )
+        self.cartesian_path_client_panda2 = self.create_client(
+            GetCartesianPath,
+            '/panda2/compute_cartesian_path'
+        )
+        
+        # Wait for services
+        self.get_logger().info('Waiting for MoveIt services...')
+        if not self.cartesian_path_client_panda1.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('Panda1 cartesian path service not available.')
+        if not self.cartesian_path_client_panda2.wait_for_service(timeout_sec=5.0):
+            self.get_logger().warn('Panda2 cartesian path service not available.')
+        
+        # Table and object definitions
+        # Table: 1.0m x 3.0m x 0.2m at x=0.7, y=0, z=0.1 (workbench from world file)
+        # Workbench pose (0.7, 0, 0.1) with size (1.0, 3.0, 0.2) means:
+        # - Center is at z=0.1, top is at z=0.2
+        self.table_pose = Pose()
+        self.table_pose.position.x = 0.7
+        self.table_pose.position.y = 0.0
+        self.table_pose.position.z = 0.1  # Center of table (half height = 0.1)
+        self.table_pose.orientation.w = 1.0
+        self.table_size = [1.0, 3.0, 0.2]  # Width (x), depth (y), height (z) from world file
+        self.table_height = 0.2  # Top of table is at z=0.2
+        
+        # Object definitions (from world file with updated positions)
+        # POSITIONS are CENTERS, not tops (SDF convention)
+        self.objects = {
+            'red_block': {
+                'position': [0.4, -0.02, 0.225],  # x, y, z (center)
+                'size': [0.05, 0.05, 0.05],  # dimensions
+                'yaw': 0.0
+            },
+            'green_block': {
+                'position': [0.45, 0.2, 0.225],
+                'size': [0.05, 0.05, 0.05],
+                'yaw': 0.0
+            },
+            'red_solid': {
+                'position': [0.6, -0.2, 0.25],  # 80mm x 30mm x 30mm
+                'size': [0.08, 0.03, 0.03],
+                'yaw': 0.0
+            },
+            'green_solid': {
+                'position': [0.6, 0.2, 0.25],
+                'size': [0.08, 0.03, 0.03],
+                'yaw': 0.0
+            },
+            'red_hollow': {
+                'position': [0.9, -0.2, 0.231],  # Receptacle (static)
+                'size': [0.08, 0.05, 0.05],
+                'yaw': -1.5708  # -90 degrees
+            },
+            'green_hollow': {
+                'position': [0.9, 0.2, 0.231],
+                'size': [0.08, 0.05, 0.05],
+                'yaw': -1.5708
+            }
+        }
+        
+        # Initialize planning scene
+        self._setup_planning_scene()
+
+    def _transform_to_robot_frame(self, world_pose: Pose, arm: str) -> Pose:
+        """Transform a pose from world frame to robot base frame."""
+        robot = self.robot_poses[arm]
+        
+        # Translate
+        dx = world_pose.position.x - robot['x']
+        dy = world_pose.position.y - robot['y']
+        dz = world_pose.position.z - robot['z']
+        
+        # Rotate (inverse of robot yaw)
+        # x' = x cos(-yaw) - y sin(-yaw)
+        # y' = x sin(-yaw) + y cos(-yaw)
+        # cos(-theta) = cos(theta), sin(-theta) = -sin(theta)
+        cos_yaw = math.cos(-robot['yaw'])
+        sin_yaw = math.sin(-robot['yaw'])
+        
+        local_x = dx * cos_yaw - dy * sin_yaw
+        local_y = dx * sin_yaw + dy * cos_yaw
+        local_z = dz
+        
+        local_pose = Pose()
+        local_pose.position.x = local_x
+        local_pose.position.y = local_y
+        local_pose.position.z = local_z
+        
+        # Orientation requires converting quat to euler, adjusting yaw, back to quat
+        # Simplified: assume objects are flat and we only care about yaw
+        # For now, we construct orientation in the caller using _euler_to_quaternion
+        # This function just transforms position
+        local_pose.orientation = world_pose.orientation
+        
+        return local_pose
 
     # ------------------------------------------------------------------
     # Motion helpers
@@ -87,6 +211,7 @@ class DualPandaIKNode(Node):
 
         pose_stamped = PoseStamped()
         pose_stamped.header.frame_id = base_frame
+        pose_stamped.header.stamp = self.get_clock().now().to_msg()
         pose_stamped.pose = pose
         request.ik_request.pose_stamped = pose_stamped
 
@@ -147,6 +272,253 @@ class DualPandaIKNode(Node):
 
         result_future = goal_handle.get_result_async()
         rclpy.spin_until_future_complete(self, result_future, timeout_sec=5.0)
+    
+    # ------------------------------------------------------------------
+    # Planning Scene helpers
+    # ------------------------------------------------------------------
+    def _setup_planning_scene(self) -> None:
+        """Set up planning scene with table and objects for both arms."""
+        self.get_logger().info('Setting up planning scene...')
+        
+        # Add table and objects to both planning scenes
+        for arm in ['panda1', 'panda2']:
+            scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
+            base_frame = 'panda_link0'  # Local frame for each robot
+            
+            # Create planning scene message
+            scene = PlanningScene()
+            scene.is_diff = True
+            scene.world.collision_objects = []
+            scene.robot_state.is_diff = True
+            
+            # Add table (transform to robot frame)
+            table_obj = CollisionObject()
+            table_obj.header.frame_id = base_frame
+            table_obj.header.stamp = self.get_clock().now().to_msg()
+            table_obj.id = 'table'
+            table_obj.operation = CollisionObject.ADD
+            
+            table_primitive = SolidPrimitive()
+            table_primitive.type = SolidPrimitive.BOX
+            table_primitive.dimensions = self.table_size
+            
+            # Transform table pose
+            table_local = self._transform_to_robot_frame(self.table_pose, arm)
+            # Correct orientation for Panda 2 (table yaw should be rotated)
+            # Table is symmetric, but if it wasn't, we'd need to rotate dimensions or orientation
+            # For box, rotating 180 around Z is same shape
+            
+            table_obj.primitives = [table_primitive]
+            table_obj.primitive_poses = [table_local]
+            scene.world.collision_objects.append(table_obj)
+            
+            # Add all objects (transform to robot frame)
+            for obj_name, obj_data in self.objects.items():
+                obj = CollisionObject()
+                obj.header.frame_id = base_frame
+                obj.id = obj_name
+                obj.operation = CollisionObject.ADD
+                
+                obj_primitive = SolidPrimitive()
+                obj_primitive.type = SolidPrimitive.BOX
+                obj_primitive.dimensions = obj_data['size']
+                
+                # Create world pose
+                world_pose = Pose()
+                world_pose.position.x = obj_data['position'][0]
+                world_pose.position.y = obj_data['position'][1]
+                world_pose.position.z = obj_data['position'][2]  # Center
+                
+                # Transform to local
+                local_pose = self._transform_to_robot_frame(world_pose, arm)
+                
+                # Calculate local yaw
+                # Yaw_local = Yaw_world - Robot_Yaw
+                obj_yaw_local = obj_data['yaw'] - self.robot_poses[arm]['yaw']
+                
+                qx, qy, qz, qw = _euler_to_quaternion(0.0, 0.0, obj_yaw_local)
+                local_pose.orientation.x = qx
+                local_pose.orientation.y = qy
+                local_pose.orientation.z = qz
+                local_pose.orientation.w = qw
+                
+                obj.primitives = [obj_primitive]
+                obj.primitive_poses = [local_pose]
+                scene.world.collision_objects.append(obj)
+            
+            # Publish scene
+            scene_pub.publish(scene)
+            self.get_logger().info(f'Planning scene published for {arm}')
+        
+        # Wait a bit for scene to be processed
+        import time
+        time.sleep(1.0)
+    
+    def _compute_cartesian_path(self, waypoints: List[Pose], arm: str = 'panda1') -> List[float]:
+        """Compute cartesian path through waypoints."""
+        cartesian_client = self.cartesian_path_client_panda1 if arm == 'panda1' else self.cartesian_path_client_panda2
+        
+        request = GetCartesianPath.Request()
+        # Use "panda_link0" as the planning frame - MoveIt works in robot frame
+        request.header.frame_id = 'panda_link0'
+        request.header.stamp = self.get_clock().now().to_msg()
+        request.group_name = 'panda_arm'
+        request.waypoints = waypoints
+        request.max_step = 0.01
+        request.jump_threshold = 0.0
+        request.avoid_collisions = True
+        
+        future = cartesian_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        response = future.result()
+        
+        if not response:
+            raise RuntimeError('Cartesian path service call failed.')
+        
+        if response.fraction < 1.0:
+            raise RuntimeError(f'Cartesian path incomplete: {response.fraction * 100:.1f}% feasible')
+        
+        # Extract joint positions from trajectory
+        if not response.solution.joint_trajectory.points:
+            raise RuntimeError('No trajectory points in cartesian path response')
+        
+        # Return joint positions from last waypoint
+        last_point = response.solution.joint_trajectory.points[-1]
+        joint_map = {name: pos for name, pos in zip(
+            response.solution.joint_trajectory.joint_names,
+            last_point.positions
+        )}
+        
+        return [joint_map[name] for name in self.joint_names]
+    
+    def pick_object(self, object_name: str, arm: str = 'panda1') -> bool:
+        """
+        Pick an object using 5-step pipeline:
+        1. Open gripper FIRST
+        2. Pre-grasp pose (15cm above object)
+        3. Linear descent to object center
+        4. Grasp (close gripper, attach object)
+        5. Linear retreat (lift 15cm up)
+        """
+        if object_name not in self.objects:
+            self.get_logger().error(f'Unknown object: {object_name}')
+            return False
+        
+        obj_data = self.objects[object_name]
+        # Use raw center position from SDF
+        obj_world_pos = obj_data['position']
+        obj_size = obj_data['size']
+        obj_yaw = obj_data['yaw']
+        
+        # Calculate object center and top (World Frame)
+        # CORRECT Z-HEIGHT: Assume objects are resting on the table
+        # SDF spawn poses might be in the air, so we calculate z based on table height
+        obj_center_z_world = self.table_height + obj_size[2] / 2
+        obj_top_z_world = self.table_height + obj_size[2]
+        
+        try:
+            import time
+            
+            # Step 1: Open gripper FIRST
+            self.get_logger().info(f'{arm}: Opening gripper...')
+            self.send_gripper_goal(0.04, arm=arm)  # Open gripper
+            time.sleep(1.5)  # Wait for gripper to open
+            
+            # Step 2: Pre-grasp pose (15cm above object top)
+            # Construct World Pose
+            world_pre_grasp = Pose()
+            world_pre_grasp.position.x = obj_world_pos[0]
+            world_pre_grasp.position.y = obj_world_pos[1]
+            world_pre_grasp.position.z = obj_top_z_world + 0.15
+            
+            # Transform to Robot Frame
+            pre_grasp_pose = self._transform_to_robot_frame(world_pre_grasp, arm)
+            
+            # Orientation: Look down (Roll=180)
+            # Need to adjust yaw relative to robot
+            # Target World Yaw = obj_yaw
+            # Target Local Yaw = obj_yaw - robot_yaw
+            # ADD 45 DEGREE OFFSET to align fingers with faces (Panda gripper fingers are diagonal in default frame?)
+            target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw'] + math.pi / 4
+            
+            qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
+            pre_grasp_pose.orientation.x = qx
+            pre_grasp_pose.orientation.y = qy
+            pre_grasp_pose.orientation.z = qz
+            pre_grasp_pose.orientation.w = qw
+            
+            # Move to pre-grasp pose using IK
+            self.get_logger().info(f'{arm}: Moving to pre-grasp pose (15cm above object)...')
+            # Ensure we use panda_link0 as base frame
+            pre_grasp_joints = self.compute_ik(pre_grasp_pose, arm=arm, base_frame='panda_link0')
+            self.send_joint_trajectory(pre_grasp_joints, arm=arm, seconds=3.0)
+            time.sleep(3.5)
+            
+            # Step 3: Linear descent to object center (cartesian path)
+            grasp_pose = Pose()
+            grasp_pose.position = pre_grasp_pose.position
+            # We want the gripper FINGERTIPS to be at object center
+            # So TCP (wrist) should be at Object Center + Gripper Length
+            # Transform object center to local frame
+            world_center_pose = Pose()
+            world_center_pose.position.x = obj_world_pos[0]
+            world_center_pose.position.y = obj_world_pos[1]
+            world_center_pose.position.z = obj_center_z_world
+            
+            local_center = self._transform_to_robot_frame(world_center_pose, arm)
+            
+            # TCP Target = Center + Gripper Length
+            grasp_pose.position.z = local_center.position.z + self.gripper_length
+            grasp_pose.orientation = pre_grasp_pose.orientation
+            
+            self.get_logger().info(f'{arm}: Linear descent to grasp pose (TCP z={grasp_pose.position.z:.3f})...')
+            waypoints = [pre_grasp_pose, grasp_pose]
+            grasp_joints = self._compute_cartesian_path(waypoints, arm=arm)
+            self.send_joint_trajectory(grasp_joints, arm=arm, seconds=2.0)
+            time.sleep(2.5)
+            
+            # Step 4: Grasp (close gripper and attach object)
+            self.get_logger().info(f'{arm}: Closing gripper to grasp object...')
+            self.send_gripper_goal(0.01, arm=arm)  # Close gripper
+            time.sleep(1.5)  # Wait for gripper to close
+            
+            # Attach object to gripper (planning scene)
+            scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
+            # base_frame = 'panda1_link0' if arm == 'panda1' else 'panda2_link0'
+            # No need for base_frame here, just link names
+            eef_link = 'panda1_hand' if arm == 'panda1' else 'panda2_hand'
+            
+            scene = PlanningScene()
+            scene.is_diff = True
+            
+            attached_obj = AttachedCollisionObject()
+            attached_obj.object.id = object_name
+            attached_obj.object.operation = CollisionObject.REMOVE
+            attached_obj.link_name = eef_link
+            attached_obj.touch_links = [eef_link, f'{arm}_hand', f'{arm}_leftfinger', f'{arm}_rightfinger']
+            
+            scene.robot_state.attached_collision_objects = [attached_obj]
+            scene_pub.publish(scene)
+            time.sleep(0.5)
+            
+            # Step 5: Linear retreat (lift 15cm up)
+            lift_pose = Pose()
+            lift_pose.position = grasp_pose.position
+            lift_pose.position.z += 0.15  # Lift 15cm relative to grasp (local z is up)
+            lift_pose.orientation = grasp_pose.orientation
+            
+            self.get_logger().info(f'{arm}: Lifting object 15cm above table...')
+            lift_waypoints = [grasp_pose, lift_pose]
+            lift_joints = self._compute_cartesian_path(lift_waypoints, arm=arm)
+            self.send_joint_trajectory(lift_joints, arm=arm, seconds=2.0)
+            time.sleep(2.5)
+            
+            self.get_logger().info(f'{arm}: Pick complete!')
+            return True
+            
+        except Exception as e:
+            self.get_logger().error(f'{arm}: Pick failed: {e}')
+            return False
 
 
 class DualPandaIKGUI:
@@ -256,10 +628,35 @@ class DualPandaIKGUI:
         
         ttk.Button(grip, text='Open Gripper', command=open_cmd).grid(column=0, row=0, padx=4, pady=(0, 4))
         ttk.Button(grip, text='Close Gripper', command=close_cmd).grid(column=1, row=0, padx=4, pady=(0, 4))
+        
+        # Object pick controls
+        pick_frame = ttk.Frame(parent)
+        pick_frame.grid(column=0, row=6, columnspan=3, pady=(12, 4), sticky='ew')
+        pick_frame.columnconfigure(0, weight=1)
+        
+        ttk.Label(pick_frame, text='Pick Object:').grid(column=0, row=0, sticky='w', padx=(0, 4))
+        
+        # Dropdown for object selection
+        object_var = tk.StringVar(value='None')
+        object_names = ['None', 'red_block', 'green_block', 'red_solid', 'green_solid', 'red_hollow', 'green_hollow']
+        object_dropdown = ttk.Combobox(pick_frame, textvariable=object_var, values=object_names, state='readonly', width=15)
+        object_dropdown.grid(column=1, row=0, padx=4, sticky='ew')
+        
+        # Pick button
+        pick_cmd = lambda: self._pick_object(object_var.get(), arm)
+        ttk.Button(pick_frame, text='Pick', command=pick_cmd).grid(column=2, row=0, padx=4)
+        
+        # Store references
+        if arm == 'panda1':
+            self.object_var_p1 = object_var
+            self.object_dropdown_p1 = object_dropdown
+        else:
+            self.object_var_p2 = object_var
+            self.object_dropdown_p2 = object_dropdown
 
         # Status
         status_var = self.status_var_panda1 if arm == 'panda1' else self.status_var_panda2
-        ttk.Label(parent, textvariable=status_var, foreground='gray').grid(column=0, row=6, columnspan=3, pady=(12, 0), sticky='w')
+        ttk.Label(parent, textvariable=status_var, foreground='gray').grid(column=0, row=7, columnspan=3, pady=(12, 0), sticky='w')
 
     def _make_entry(self, frame: ttk.Frame, label: str, default: float, column: int, row: int) -> tk.Entry:
         """Create a labeled entry widget."""
@@ -369,6 +766,30 @@ class DualPandaIKGUI:
         """Send gripper command to both arms."""
         self._send_gripper(width, 'panda1')
         self._send_gripper(width, 'panda2')
+    
+    def _pick_object(self, object_name: str, arm: str) -> None:
+        """Handle pick object button click."""
+        if object_name == 'None':
+            messagebox.showwarning('No Object', 'Please select an object to pick.')
+            return
+        
+        status_var = self.status_var_panda1 if arm == 'panda1' else self.status_var_panda2
+        status_var.set(f'Picking {object_name}...')
+        self.root.update_idletasks()
+        
+        # Run pick in separate thread to avoid blocking GUI
+        def pick_thread():
+            try:
+                success = self.node.pick_object(object_name, arm=arm)
+                if success:
+                    status_var.set(f'Pick {object_name} complete!')
+                else:
+                    status_var.set(f'Pick {object_name} failed!')
+            except Exception as e:
+                status_var.set(f'Pick error: {str(e)}')
+                self.node.get_logger().error(f'Pick error: {e}')
+        
+        threading.Thread(target=pick_thread, daemon=True).start()
 
     # ------------------------------------------------------------------
     def run(self) -> None:
