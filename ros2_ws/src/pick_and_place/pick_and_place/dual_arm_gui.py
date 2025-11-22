@@ -582,10 +582,15 @@ class DualPandaIKNode(Node):
             grasp_pose = Pose()
             grasp_pose.orientation = new_pre_grasp_pose.orientation
             
+            # Use Table Top + Half Object Height for consistent grasp Z
+            # This handles short objects better than relying on perceived center which might be inaccurate
+            TABLE_TOP_Z = 0.2
+            grasp_target_z_world = TABLE_TOP_Z + (obj_size[2] / 2.0)
+            
             world_center_pose = Pose()
             world_center_pose.position.x = obj_world_pos[0]
             world_center_pose.position.y = obj_world_pos[1]
-            world_center_pose.position.z = obj_center_z_world
+            world_center_pose.position.z = grasp_target_z_world
             
             local_center = self._transform_to_robot_frame(world_center_pose, arm)
             
