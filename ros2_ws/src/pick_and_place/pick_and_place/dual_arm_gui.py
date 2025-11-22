@@ -161,8 +161,51 @@ class DualPandaIKNode(Node):
             }
         }
         
+        # Lock for thread-safe access to objects dictionary
+        self.objects_lock = threading.Lock()
+        
         # Initialize planning scene
         self._setup_planning_scene()
+        
+        # Subscribe to Ground Truth poses from Gazebo Bridge
+        self.pose_subs = []
+        for obj_name in self.objects.keys():
+            topic = f'/model/{obj_name}/pose'
+            self.get_logger().info(f'Subscribing to ground truth: {topic}')
+            sub = self.create_subscription(
+                PoseStamped,
+                topic,
+                lambda msg, name=obj_name: self._pose_callback(msg, name),
+                10
+            )
+            self.pose_subs.append(sub)
+            
+        self.get_logger().info('Dual Panda IK GUI Node initialized. Receiving ground truth poses...')
+
+    def _pose_callback(self, msg: PoseStamped, obj_name: str):
+        """Update object pose from ground truth."""
+        with self.objects_lock:
+            if obj_name in self.objects:
+                # Update position
+                self.objects[obj_name]['position'] = [
+                    msg.pose.position.x,
+                    msg.pose.position.y,
+                    msg.pose.position.z
+                ]
+                
+                # Update Yaw from Quaternion
+                q = [
+                    msg.pose.orientation.x,
+                    msg.pose.orientation.y,
+                    msg.pose.orientation.z,
+                    msg.pose.orientation.w
+                ]
+                # Manual yaw calculation to avoid numpy issues
+                siny_cosp = 2.0 * (q[3] * q[2] + q[0] * q[1])
+                cosy_cosp = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2])
+                yaw = math.atan2(siny_cosp, cosy_cosp)
+                
+                self.objects[obj_name]['yaw'] = yaw
 
     def _transform_to_robot_frame(self, world_pose: Pose, arm: str) -> Pose:
         """Transform a pose from world frame to robot base frame."""
@@ -280,6 +323,9 @@ class DualPandaIKNode(Node):
         """Set up planning scene with table and objects for both arms."""
         self.get_logger().info('Setting up planning scene...')
         
+        with self.objects_lock:
+            objects_copy = {k: v.copy() for k, v in self.objects.items()}
+        
         # Add table and objects to both planning scenes
         for arm in ['panda1', 'panda2']:
             scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
@@ -313,7 +359,7 @@ class DualPandaIKNode(Node):
             scene.world.collision_objects.append(table_obj)
             
             # Add all objects (transform to robot frame)
-            for obj_name, obj_data in self.objects.items():
+            for obj_name, obj_data in objects_copy.items():
                 obj = CollisionObject()
                 obj.header.frame_id = base_frame
                 obj.id = obj_name
@@ -400,20 +446,21 @@ class DualPandaIKNode(Node):
         4. Grasp (close gripper, attach object)
         5. Linear retreat (lift 15cm up)
         """
-        if object_name not in self.objects:
-            self.get_logger().error(f'Unknown object: {object_name}')
-            return False
+        with self.objects_lock:
+            if object_name not in self.objects:
+                self.get_logger().error(f'Unknown object: {object_name}')
+                return False
+            
+            obj_data = self.objects[object_name].copy()
         
-        obj_data = self.objects[object_name]
         # Use raw center position from SDF
         obj_world_pos = obj_data['position']
         obj_size = obj_data['size']
         obj_yaw = obj_data['yaw']
         
         # Calculate object center and top (World Frame)
-        # All objects rest on table - calculate z from table height for consistency
-        # The SDF spawn positions may be slightly off due to physics settling
-        obj_center_z_world = self.table_height + obj_size[2] / 2
+        # Use Ground Truth Z directly from perception
+        obj_center_z_world = obj_world_pos[2]
         obj_top_z_world = obj_center_z_world + obj_size[2] / 2
         
         try:
@@ -438,22 +485,8 @@ class DualPandaIKNode(Node):
             # Need to adjust yaw relative to robot
             # Target World Yaw = obj_yaw
             # Target Local Yaw = obj_yaw - robot_yaw
-            # Panda gripper fingers open/close along Y-axis in gripper frame
-            # For cubes (equal dimensions), add 45-degree offset to align with faces
-            # For solids (rectangular), fingers should align with the object's yaw
-            # For hollows, add 45-degree offset (user feedback)
-            is_cube = abs(obj_size[0] - obj_size[1]) < 0.001  # Check if it's a cube
-            is_hollow = 'hollow' in object_name
-            
-            if is_cube:
-                # Cubes: Add 45-degree offset for better face alignment
-                target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw'] + math.pi / 4
-            elif is_hollow:
-                # Hollows: Add 45-degree offset (user feedback)
-                target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw'] + math.pi / 4
-            else:
-                # Solids: Use object's yaw directly (no offset needed)
-                target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw']
+            # ADD 45 DEGREE OFFSET to align fingers with faces (Panda gripper fingers are diagonal in default frame?)
+            target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw'] + math.pi / 4
             
             qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
             pre_grasp_pose.orientation.x = qx
@@ -468,31 +501,21 @@ class DualPandaIKNode(Node):
             self.send_joint_trajectory(pre_grasp_joints, arm=arm, seconds=3.0)
             time.sleep(3.5)
             
-            # Step 3: Linear descent to object (cartesian path)
+            # Step 3: Linear descent to object center (cartesian path)
             grasp_pose = Pose()
             grasp_pose.position = pre_grasp_pose.position
+            # We want the gripper FINGERTIPS to be at object center
+            # So TCP (wrist) should be at Object Center + Gripper Length
+            # Transform object center to local frame
+            world_center_pose = Pose()
+            world_center_pose.position.x = obj_world_pos[0]
+            world_center_pose.position.y = obj_world_pos[1]
+            world_center_pose.position.z = obj_center_z_world
             
-            # For shorter objects (solids), grasp lower than center for better grip
-            # For taller objects (blocks), grasp at center
-            # Calculate grasp target Z: lower on object for shorter objects
-            is_solid = 'solid' in object_name
-            if is_solid:
-                # Solids are shorter (0.03m) - grasp at lower third (bottom + 1/3 of height)
-                grasp_target_z_world = self.table_height + obj_size[2] * (1.0 / 3.0)
-            else:
-                # Blocks and hollows - grasp at center
-                grasp_target_z_world = obj_center_z_world
+            local_center = self._transform_to_robot_frame(world_center_pose, arm)
             
-            # Transform grasp target to local frame
-            world_grasp_pose = Pose()
-            world_grasp_pose.position.x = obj_world_pos[0]
-            world_grasp_pose.position.y = obj_world_pos[1]
-            world_grasp_pose.position.z = grasp_target_z_world
-            
-            local_grasp_target = self._transform_to_robot_frame(world_grasp_pose, arm)
-            
-            # TCP Target = Grasp Target + Gripper Length (so fingertips are at grasp target)
-            grasp_pose.position.z = local_grasp_target.position.z + self.gripper_length
+            # TCP Target = Center + Gripper Length
+            grasp_pose.position.z = local_center.position.z + self.gripper_length
             grasp_pose.orientation = pre_grasp_pose.orientation
             
             self.get_logger().info(f'{arm}: Linear descent to grasp pose (TCP z={grasp_pose.position.z:.3f})...')
@@ -508,6 +531,8 @@ class DualPandaIKNode(Node):
             
             # Attach object to gripper (planning scene)
             scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
+            # base_frame = 'panda1_link0' if arm == 'panda1' else 'panda2_link0'
+            # No need for base_frame here, just link names
             eef_link = 'panda1_hand' if arm == 'panda1' else 'panda2_hand'
             
             scene = PlanningScene()
@@ -517,28 +542,7 @@ class DualPandaIKNode(Node):
             attached_obj.object.id = object_name
             attached_obj.object.operation = CollisionObject.REMOVE
             attached_obj.link_name = eef_link
-            
-            # For hollows, disable collisions to allow lifting through walls
-            is_hollow = 'hollow' in object_name
-            if is_hollow:
-                # Add all gripper links as touch links to disable collisions
-                attached_obj.touch_links = [
-                    eef_link, 
-                    f'{arm}_hand', 
-                    f'{arm}_leftfinger', 
-                    f'{arm}_rightfinger',
-                    f'{arm}_link7',  # Add more links to allow lifting
-                    f'{arm}_link8'
-                ]
-                attached_obj.object.meshes = []  # Clear meshes for hollow
-                attached_obj.object.mesh_poses = []
-                # Also remove from world collision objects
-                world_obj = CollisionObject()
-                world_obj.id = object_name
-                world_obj.operation = CollisionObject.REMOVE
-                scene.world.collision_objects.append(world_obj)
-            else:
-                attached_obj.touch_links = [eef_link, f'{arm}_hand', f'{arm}_leftfinger', f'{arm}_rightfinger']
+            attached_obj.touch_links = [eef_link, f'{arm}_hand', f'{arm}_leftfinger', f'{arm}_rightfinger']
             
             scene.robot_state.attached_collision_objects = [attached_obj]
             scene_pub.publish(scene)

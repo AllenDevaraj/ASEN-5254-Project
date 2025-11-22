@@ -148,11 +148,39 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(use_gui)
     )
+
+    # Bridge for clock
+    bridge_clock = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=['/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock'],
+        output='screen'
+    )
+
+    # Bridge for Ground Truth Object Poses
+    # Maps Gazebo /model/<name>/pose -> ROS /model/<name>/pose
+    bridge_objects = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/model/red_block/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/model/green_block/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/model/red_solid/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/model/green_solid/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/model/red_hollow/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/model/green_hollow/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+        ],
+        output='screen'
+    )
     
     return LaunchDescription([
         # Arguments
         use_rviz_arg,
         use_gui_arg,
+
+        # Bridges
+        bridge_clock,
+        bridge_objects,
         
         # Simulation (must start first)
         dual_panda_sim,
