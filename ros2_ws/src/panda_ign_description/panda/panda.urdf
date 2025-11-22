@@ -244,6 +244,9 @@
     <child link="panda_hand"/>
     <origin rpy="0 0 -0.785398163397" xyz="0 0 0"/>
   </joint>
+  <gazebo reference="panda_hand_joint">
+    <disableFixedJointLumping>true</disableFixedJointLumping>
+  </gazebo>
   <link name="panda_hand">
     <inertial>
       <mass value="0.73"/>

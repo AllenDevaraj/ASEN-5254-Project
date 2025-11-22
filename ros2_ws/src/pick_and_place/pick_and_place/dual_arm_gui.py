@@ -5,6 +5,7 @@
 import math
 import threading
 import tkinter as tk
+from functools import partial
 from tkinter import ttk, messagebox
 from typing import List, Tuple
 
@@ -16,8 +17,9 @@ from rclpy.action import ActionClient
 from control_msgs.action import GripperCommand, FollowJointTrajectory
 from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.msg import PlanningScene, CollisionObject, AttachedCollisionObject
-from moveit_msgs.srv import GetPositionIK, GetCartesianPath
+from moveit_msgs.srv import GetPositionIK, GetPositionFK, GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
+from sensor_msgs.msg import JointState
 from std_msgs.msg import Header
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
 from tf2_msgs.msg import TFMessage
@@ -53,6 +55,14 @@ class DualPandaIKNode(Node):
         # When grasping top-down, we must add this to the target Z
         self.gripper_length = 0.11  # 11cm
         self.neutral_pose: List[float] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]
+        
+        # Latest Joint States
+        self.joint_state_p1 = None
+        self.joint_state_p2 = None
+        
+        # Latest EE Poses (from FK)
+        self.ee_poses = {'panda1': None, 'panda2': None}
+        self.fk_futures = {'panda1': None, 'panda2': None}
 
         # Panda 1 clients
         self.traj_client_panda1 = ActionClient(
@@ -61,6 +71,7 @@ class DualPandaIKNode(Node):
             '/panda1/panda_arm_controller/follow_joint_trajectory',
         )
         self.ik_client_panda1 = self.create_client(GetPositionIK, '/panda1/compute_ik')
+        self.fk_client_panda1 = self.create_client(GetPositionFK, '/panda1/compute_fk')
         self.gripper_client_panda1 = ActionClient(
             self,
             GripperCommand,
@@ -74,6 +85,7 @@ class DualPandaIKNode(Node):
             '/panda2/panda_arm_controller/follow_joint_trajectory',
         )
         self.ik_client_panda2 = self.create_client(GetPositionIK, '/panda2/compute_ik')
+        self.fk_client_panda2 = self.create_client(GetPositionFK, '/panda2/compute_fk')
         self.gripper_client_panda2 = ActionClient(
             self,
             GripperCommand,
@@ -81,11 +93,16 @@ class DualPandaIKNode(Node):
         )
 
         # Wait for services
-        self.get_logger().info('Waiting for MoveIt compute_ik services...')
+        self.get_logger().info('Waiting for MoveIt compute_ik/fk services...')
         if not self.ik_client_panda1.wait_for_service(timeout_sec=10.0):
             self.get_logger().error('Panda1 compute_ik service not available.')
+        if not self.fk_client_panda1.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('Panda1 compute_fk service not available.')
+            
         if not self.ik_client_panda2.wait_for_service(timeout_sec=10.0):
             self.get_logger().error('Panda2 compute_ik service not available.')
+        if not self.fk_client_panda2.wait_for_service(timeout_sec=10.0):
+            self.get_logger().error('Panda2 compute_fk service not available.')
 
         self.get_logger().info('Waiting for action servers...')
         self.gripper_client_panda1.wait_for_server(timeout_sec=5.0)
@@ -198,18 +215,22 @@ class DualPandaIKNode(Node):
         )
         self.pose_subs.append(sub_global)
         
-        # 2. End Effectors (PoseStamped)
-        for arm in ['panda1', 'panda2']:
-            topic = f'/model/{arm}/link/panda_hand/pose'
-            obj_name = f'{arm}_ee'
-            self.get_logger().info(f'Subscribing to EE pose: {topic}')
-            sub = self.create_subscription(
-                PoseStamped,
-                topic,
-                lambda msg, name=obj_name: self._pose_callback(msg, name),
-                10
-            )
-            self.pose_subs.append(sub)
+        # 2. Joint States (for EE Pose calculation via FK)
+        self.get_logger().info('Subscribing to /panda1/joint_states')
+        self.js_sub1 = self.create_subscription(
+            JointState,
+            '/panda1/joint_states',
+            lambda msg: self._joint_state_callback(msg, 'panda1'),
+            10
+        )
+        
+        self.get_logger().info('Subscribing to /panda2/joint_states')
+        self.js_sub2 = self.create_subscription(
+            JointState,
+            '/panda2/joint_states',
+            lambda msg: self._joint_state_callback(msg, 'panda2'),
+            10
+        )
             
         self.get_logger().info('Dual Panda IK GUI Node initialized. Receiving ground truth poses...')
 
@@ -261,15 +282,93 @@ class DualPandaIKNode(Node):
             time.sleep(0.01)
         return True
 
+    def _joint_state_callback(self, msg: JointState, arm: str):
+        """Handle joint state updates and trigger FK."""
+        if arm == 'panda1':
+            self.joint_state_p1 = msg
+        else:
+            self.joint_state_p2 = msg
+            
+        # Trigger FK if not already running
+        if self.fk_futures[arm] is None or self.fk_futures[arm].done():
+            self._trigger_fk(arm, msg)
+
+    def _trigger_fk(self, arm: str, joint_state: JointState):
+        """Call FK service asynchronously."""
+        client = self.fk_client_panda1 if arm == 'panda1' else self.fk_client_panda2
+        if not client.service_is_ready():
+            return
+
+        req = GetPositionFK.Request()
+        # Use local base frame to avoid TF dependency (since TF might be conflicted)
+        req.header.frame_id = 'panda_link0' 
+        req.fk_link_names = ['panda_hand']
+        req.robot_state.joint_state = joint_state
+        
+        future = client.call_async(req)
+        future.add_done_callback(partial(self._fk_done_callback, arm=arm))
+        self.fk_futures[arm] = future
+
+    def _fk_done_callback(self, future, arm: str):
+        """Handle FK response and transform to world."""
+        try:
+            resp = future.result()
+            if resp.error_code.val == resp.error_code.SUCCESS:
+                if resp.pose_stamped:
+                    # Pose in panda_link0 frame
+                    local_pose = resp.pose_stamped[0].pose
+                    
+                    # Transform to World (Manual TF)
+                    # World = RobotBase * Local
+                    # Simple translation + yaw rotation
+                    robot = self.robot_poses[arm]
+                    
+                    # Rotate Local Position by Robot Yaw
+                    # x_w = x_r * cos(yaw) - y_r * sin(yaw) + x_base
+                    # y_w = x_r * sin(yaw) + y_r * cos(yaw) + y_base
+                    # z_w = z_r + z_base
+                    cos_yaw = math.cos(robot['yaw'])
+                    sin_yaw = math.sin(robot['yaw'])
+                    
+                    lx = local_pose.position.x
+                    ly = local_pose.position.y
+                    lz = local_pose.position.z
+                    
+                    wx = lx * cos_yaw - ly * sin_yaw + robot['x']
+                    wy = lx * sin_yaw + ly * cos_yaw + robot['y']
+                    wz = lz + robot['z']
+                    
+                    # Rotate Orientation
+                    # We need to add robot yaw to local yaw.
+                    # Convert local quat to RPY
+                    q = [local_pose.orientation.x, local_pose.orientation.y, local_pose.orientation.z, local_pose.orientation.w]
+                    
+                    sinr_cosp = 2 * (q[3] * q[0] + q[1] * q[2])
+                    cosr_cosp = 1 - 2 * (q[0] * q[0] + q[1] * q[1])
+                    l_roll = math.atan2(sinr_cosp, cosr_cosp)
+
+                    sinp = 2 * (q[3] * q[1] - q[2] * q[0])
+                    if abs(sinp) >= 1:
+                        l_pitch = math.copysign(math.pi / 2, sinp)
+                    else:
+                        l_pitch = math.asin(sinp)
+
+                    siny_cosp = 2 * (q[3] * q[2] + q[0] * q[1])
+                    cosy_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
+                    l_yaw = math.atan2(siny_cosp, cosy_cosp)
+                    
+                    # Add base yaw
+                    w_yaw = l_yaw + robot['yaw']
+                    w_roll = l_roll
+                    w_pitch = l_pitch
+                    
+                    self.ee_poses[arm] = [wx, wy, wz, w_roll, w_pitch, w_yaw]
+        except Exception as e:
+            pass # calc fail
+
     def get_ee_pose(self, arm: str) -> List[float]:
-        """Get current EE pose [x, y, z, roll, pitch, yaw] from bridged topic."""
-        obj_name = f'{arm}_ee'
-        data = self.get_pose(obj_name)
-        if data and 'rpy' in data:
-            p = data['position']
-            rpy = data['rpy']
-            return [p[0], p[1], p[2], rpy[0], rpy[1], rpy[2]]
-        return None
+        """Get current EE pose from stored FK result."""
+        return self.ee_poses.get(arm)
 
     def _pose_callback(self, msg: PoseStamped, obj_name: str):
         """Update object pose from ground truth."""
@@ -1204,39 +1303,46 @@ class DualPandaIKGUI:
         """Build live monitor widgets."""
         self.monitor_vars = {}
         
-        objects = ['red_block', 'green_block', 'red_solid', 'green_solid', 'red_hollow', 'green_hollow', 'panda1', 'panda2']
+        # Objects only (removed panda1/panda2 bases)
+        objects = ['red_block', 'green_block', 'red_solid', 'green_solid', 'red_hollow', 'green_hollow']
         
         row = 0
         for obj in objects:
-            lbl = ttk.Label(parent, text=f'{obj}:', font=('Arial', 10, 'bold'))
-            lbl.grid(column=0, row=row, sticky='w', pady=2)
+            container = ttk.Frame(parent)
+            container.grid(column=0, row=row, sticky='ew', pady=1)
+            
+            lbl = ttk.Label(container, text=f'{obj}:', font=('Arial', 9, 'bold'), width=12)
+            lbl.pack(side='left')
             
             var = tk.StringVar(value='Waiting...')
-            val_lbl = ttk.Label(parent, textvariable=var, font=('Courier', 9))
-            val_lbl.grid(column=0, row=row+1, sticky='w', padx=10, pady=(0, 8))
+            val_lbl = ttk.Label(container, textvariable=var, font=('Courier', 9))
+            val_lbl.pack(side='left')
             
             self.monitor_vars[obj] = var
-            row += 2
+            row += 1
             
         # Separator
-        ttk.Separator(parent, orient='horizontal').grid(column=0, row=row, sticky='ew', pady=10)
+        ttk.Separator(parent, orient='horizontal').grid(column=0, row=row, sticky='ew', pady=5)
         row += 1
         
         # EE Poses
-        ttk.Label(parent, text='End Effector Poses (TF):', font=('Arial', 10, 'bold')).grid(column=0, row=row, sticky='w', pady=2)
+        ttk.Label(parent, text='End Effector Poses (Live):', font=('Arial', 10, 'bold')).grid(column=0, row=row, sticky='w', pady=2)
         row += 1
         
         self.ee_vars = {}
         for arm in ['panda1', 'panda2']:
-            lbl = ttk.Label(parent, text=f'{arm} EE:', font=('Arial', 9, 'italic'))
-            lbl.grid(column=0, row=row, sticky='w')
+            container = ttk.Frame(parent)
+            container.grid(column=0, row=row, sticky='ew', pady=1)
             
-            var = tk.StringVar(value='No TF')
-            val_lbl = ttk.Label(parent, textvariable=var, font=('Courier', 9))
-            val_lbl.grid(column=0, row=row+1, sticky='w', padx=10, pady=(0, 8))
+            lbl = ttk.Label(container, text=f'{arm}:', font=('Arial', 9, 'bold'), width=12)
+            lbl.pack(side='left')
+            
+            var = tk.StringVar(value='No Data')
+            val_lbl = ttk.Label(container, textvariable=var, font=('Courier', 9))
+            val_lbl.pack(side='left')
             
             self.ee_vars[arm] = var
-            row += 2
+            row += 1
 
     def _update_live_monitor(self) -> None:
         """Update live monitor values."""
@@ -1246,7 +1352,8 @@ class DualPandaIKGUI:
             if data:
                 pos = data['position']
                 yaw = data['yaw']
-                text = f"X:{pos[0]:.2f} Y:{pos[1]:.2f} Z:{pos[2]:.2f}\nYaw:{yaw:.2f}"
+                # Single line format
+                text = f"X:{pos[0]:.2f} Y:{pos[1]:.2f} Z:{pos[2]:.2f} Yaw:{yaw:.2f}"
                 var.set(text)
             else:
                 var.set("No Data")
@@ -1255,10 +1362,11 @@ class DualPandaIKGUI:
         for arm, var in self.ee_vars.items():
             pose = self.node.get_ee_pose(arm)
             if pose:
-                text = f"X:{pose[0]:.2f} Y:{pose[1]:.2f} Z:{pose[2]:.2f}\nR:{pose[3]:.2f} P:{pose[4]:.2f} Y:{pose[5]:.2f}"
+                # pose = [x, y, z, roll, pitch, yaw]
+                text = f"X:{pose[0]:.2f} Y:{pose[1]:.2f} Z:{pose[2]:.2f} RPY:{pose[3]:.1f},{pose[4]:.1f},{pose[5]:.1f}"
                 var.set(text)
             else:
-                var.set("No TF")
+                var.set("No Data")
         
         self.root.after(100, self._update_live_monitor)
 

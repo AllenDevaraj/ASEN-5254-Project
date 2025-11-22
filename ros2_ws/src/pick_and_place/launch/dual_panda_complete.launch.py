@@ -148,20 +148,13 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(use_gui)
     )
-
-    # Bridge for clock
-    bridge_clock = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=['/clock@rosgraph_msgs/msg/Clock[ignition.msgs.Clock'],
-        output='screen'
-    )
-
+    
     # Bridge for Ground Truth Poses
     # Objects: Use global Pose_V -> TFMessage bridge for efficiency
     bridge_objects_global = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
+        name='bridge_objects_global',
         arguments=[
             '/world/pick_and_place_world/pose/info@tf2_msgs/msg/TFMessage[ignition.msgs.Pose_V'
         ],
@@ -171,26 +164,13 @@ def generate_launch_description():
         output='screen'
     )
 
-    # End Effectors: Specific link poses (PoseStamped)
-    bridge_ee = Node(
-        package='ros_gz_bridge',
-        executable='parameter_bridge',
-        arguments=[
-            '/model/panda1/link/panda_hand/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-            '/model/panda2/link/panda_hand/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-        ],
-        output='screen'
-    )
-    
     return LaunchDescription([
         # Arguments
         use_rviz_arg,
         use_gui_arg,
 
-        # Bridges
-        bridge_clock,
+        # Bridges (Clock is already bridged in dual_panda_demo)
         bridge_objects_global,
-        bridge_ee,
         
         # Simulation (must start first)
         dual_panda_sim,
