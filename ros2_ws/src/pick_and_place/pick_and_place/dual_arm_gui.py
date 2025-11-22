@@ -166,6 +166,9 @@ class DualPandaIKNode(Node):
         # Lock for thread-safe access to objects dictionary
         self.objects_lock = threading.Lock()
         
+        # Track held objects per arm
+        self.held_objects = {'panda1': None, 'panda2': None}
+        
         # Initialize planning scene
         self._setup_planning_scene()
         
@@ -641,10 +644,115 @@ class DualPandaIKNode(Node):
             self.send_joint_trajectory(lift_joints, arm=arm, seconds=2.0)
             
             self.get_logger().info(f'{arm}: Pick complete!')
+            self.held_objects[arm] = object_name
             return True
             
         except Exception as e:
             self.get_logger().error(f'{arm}: Pick failed: {e}')
+            return False
+
+    def place_object(self, arm: str, target_pos: List[float]) -> bool:
+        """
+        Place the held object at target (x, y, z_surface).
+        """
+        if not self.held_objects[arm]:
+            self.get_logger().warn(f'{arm}: No object held! Assuming generic placement.')
+            obj_height = 0.05
+            obj_name = "unknown"
+        else:
+            obj_name = self.held_objects[arm]
+            obj_data = self.get_pose(obj_name)
+            if obj_data:
+                obj_height = obj_data['size'][2]
+            else:
+                obj_height = 0.05 # Default
+
+        try:
+            import time
+            
+            # Target Position (Surface)
+            tx, ty, tz_surface = target_pos
+            
+            # Calculate TCP Place Pose (Wrist Position)
+            # Use helper to get Robot Frame Center
+            world_target = Pose()
+            world_target.position.x = tx
+            world_target.position.y = ty
+            world_target.position.z = tz_surface + (obj_height / 2.0) # Object Center Z World
+            
+            # Get Robot Frame Target Center
+            robot_target_center = self._transform_to_robot_frame(world_target, arm)
+            
+            # Now apply Gripper Offset in Robot Frame (Z is up)
+            robot_place_z = robot_target_center.position.z + self.gripper_length
+            
+            # Orientation: Down (Standard Pick Orientation)
+            # Align with robot base (Yaw=0 in robot frame)
+            # User requested a 45 degree offset to counteract auto-rotation or match pick orientation
+            target_yaw_local = math.pi / 4.0 
+            qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
+            
+            # 1. Move to Pre-Place (Hover)
+            pre_place_pose = Pose()
+            pre_place_pose.position.x = robot_target_center.position.x
+            pre_place_pose.position.y = robot_target_center.position.y
+            pre_place_pose.position.z = robot_place_z + 0.15
+            pre_place_pose.orientation.x = qx
+            pre_place_pose.orientation.y = qy
+            pre_place_pose.orientation.z = qz
+            pre_place_pose.orientation.w = qw
+            
+            self.get_logger().info(f'{arm}: Moving to pre-place...')
+            # Use IK
+            pre_place_joints = self.compute_ik(pre_place_pose, arm=arm, base_frame='panda_link0')
+            self.send_joint_trajectory(pre_place_joints, arm=arm, seconds=4.0)
+            
+            # 2. Descent to Place
+            place_pose = Pose()
+            place_pose.orientation = pre_place_pose.orientation
+            place_pose.position = pre_place_pose.position
+            place_pose.position.z = robot_place_z
+            
+            self.get_logger().info(f'{arm}: Descending to place...')
+            waypoints = [pre_place_pose, place_pose]
+            place_joints = self._compute_cartesian_path(waypoints, arm=arm)
+            self.send_joint_trajectory(place_joints, arm=arm, seconds=3.0)
+            
+            # 3. Open Gripper
+            self.get_logger().info(f'{arm}: Releasing object...')
+            self.send_gripper_goal(0.04, arm=arm)
+            time.sleep(1.0)
+            
+            # 4. Detach
+            if obj_name != "unknown":
+                scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
+                eef_link = 'panda1_hand' if arm == 'panda1' else 'panda2_hand'
+                
+                scene = PlanningScene()
+                scene.is_diff = True
+                attached_obj = AttachedCollisionObject()
+                attached_obj.object.id = obj_name
+                attached_obj.object.operation = CollisionObject.REMOVE # Detach
+                attached_obj.link_name = eef_link
+                scene.robot_state.attached_collision_objects = [attached_obj]
+                scene_pub.publish(scene)
+                self.held_objects[arm] = None
+            
+            # 5. Retreat
+            retreat_pose = Pose()
+            retreat_pose.orientation = place_pose.orientation
+            retreat_pose.position = place_pose.position
+            retreat_pose.position.z += 0.15
+            
+            self.get_logger().info(f'{arm}: Retreating...')
+            waypoints_ret = [place_pose, retreat_pose]
+            ret_joints = self._compute_cartesian_path(waypoints_ret, arm=arm)
+            self.send_joint_trajectory(ret_joints, arm=arm, seconds=2.0)
+            
+            return True
+
+        except Exception as e:
+            self.get_logger().error(f'{arm}: Place failed: {e}')
             return False
 
 
@@ -781,9 +889,42 @@ class DualPandaIKGUI:
             self.object_var_p2 = object_var
             self.object_dropdown_p2 = object_dropdown
 
+        # Place controls
+        place_frame = ttk.Frame(parent)
+        place_frame.grid(column=0, row=7, columnspan=3, pady=(4, 4), sticky='ew')
+        place_frame.columnconfigure(0, weight=1)
+        
+        ttk.Label(place_frame, text='Place Location (Surface):').grid(column=0, row=0, columnspan=3, sticky='w')
+        
+        # Simple X, Y, Z entries for place
+        place_coords_frame = ttk.Frame(place_frame)
+        place_coords_frame.grid(column=0, row=1, columnspan=3, sticky='ew')
+        place_coords_frame.columnconfigure((0, 1, 2), weight=1)
+        
+        # Defaults based on arm
+        def_x = 0.5
+        def_y = 0.3 if arm == 'panda1' else -0.3
+        def_z = 0.2
+        
+        def make_mini(p, l, d, c):
+            f = ttk.Frame(p)
+            f.grid(column=c, row=0, padx=2)
+            ttk.Label(f, text=l).pack(side='left')
+            e = ttk.Entry(f, width=6)
+            e.insert(0, str(d))
+            e.pack(side='left')
+            return e
+            
+        px = make_mini(place_coords_frame, 'X:', def_x, 0)
+        py = make_mini(place_coords_frame, 'Y:', def_y, 1)
+        pz = make_mini(place_coords_frame, 'Z:', def_z, 2)
+        
+        place_cmd = lambda: self._place_object(arm, px.get(), py.get(), pz.get())
+        ttk.Button(place_frame, text='Place', command=place_cmd).grid(column=0, row=2, columnspan=3, pady=4)
+
         # Status
         status_var = self.status_var_panda1 if arm == 'panda1' else self.status_var_panda2
-        ttk.Label(parent, textvariable=status_var, foreground='gray').grid(column=0, row=7, columnspan=3, pady=(12, 0), sticky='w')
+        ttk.Label(parent, textvariable=status_var, foreground='gray').grid(column=0, row=8, columnspan=3, pady=(12, 0), sticky='w')
 
     def _make_entry(self, frame: ttk.Frame, label: str, default: float, column: int, row: int) -> tk.Entry:
         """Create a labeled entry widget."""
@@ -917,6 +1058,34 @@ class DualPandaIKGUI:
                 self.node.get_logger().error(f'Pick error: {e}')
         
         threading.Thread(target=pick_thread, daemon=True).start()
+
+    def _place_object(self, arm: str, x_str: str, y_str: str, z_str: str) -> None:
+        """Handle place object button click."""
+        status_var = self.status_var_panda1 if arm == 'panda1' else self.status_var_panda2
+        
+        try:
+            x = float(x_str)
+            y = float(y_str)
+            z = float(z_str)
+        except ValueError:
+            messagebox.showerror('Invalid input', 'Place coordinates must be numeric.')
+            return
+
+        status_var.set(f'Placing at ({x}, {y}, {z})...')
+        self.root.update_idletasks()
+
+        def place_thread():
+            try:
+                success = self.node.place_object(arm, [x, y, z])
+                if success:
+                    status_var.set('Place complete!')
+                else:
+                    status_var.set('Place failed!')
+            except Exception as e:
+                status_var.set(f'Place error: {str(e)}')
+                self.node.get_logger().error(f'Place error: {e}')
+
+        threading.Thread(target=place_thread, daemon=True).start()
 
     # ------------------------------------------------------------------
     def run(self) -> None:
