@@ -20,6 +20,8 @@ from moveit_msgs.srv import GetPositionIK, GetCartesianPath
 from shape_msgs.msg import SolidPrimitive
 from std_msgs.msg import Header
 from trajectory_msgs.msg import JointTrajectory, JointTrajectoryPoint
+from tf2_msgs.msg import TFMessage
+from tf2_ros import Buffer, TransformListener
 
 
 class DualPandaIKNode(Node):
@@ -27,6 +29,10 @@ class DualPandaIKNode(Node):
 
     def __init__(self) -> None:
         super().__init__('dual_panda_ik_gui_node')
+        
+        # TF Buffer for EE pose tracking
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
         
         # Robot world poses (from launch file)
         self.robot_poses = {
@@ -172,11 +178,31 @@ class DualPandaIKNode(Node):
         # Initialize planning scene
         self._setup_planning_scene()
         
-        # Subscribe to Ground Truth poses from Gazebo Bridge
+        # Add robots to tracked objects for live monitoring (after scene setup to avoid collision object creation)
+        with self.objects_lock:
+            self.objects['panda1'] = {'position': [0.0, 0.0, 0.0], 'yaw': 0.0, 'size': [0.0, 0.0, 0.0]}
+            self.objects['panda2'] = {'position': [0.0, 0.0, 0.0], 'yaw': 0.0, 'size': [0.0, 0.0, 0.0]}
+            self.objects['panda1_ee'] = {'position': [0.0, 0.0, 0.0], 'yaw': 0.0, 'size': [0.0, 0.0, 0.0]}
+            self.objects['panda2_ee'] = {'position': [0.0, 0.0, 0.0], 'yaw': 0.0, 'size': [0.0, 0.0, 0.0]}
+        
+        # Subscribe to Ground Truth poses
         self.pose_subs = []
-        for obj_name in self.objects.keys():
-            topic = f'/model/{obj_name}/pose'
-            self.get_logger().info(f'Subscribing to ground truth: {topic}')
+        
+        # 1. Global Object Poses (TFMessage)
+        self.get_logger().info('Subscribing to /objects_poses_sim')
+        sub_global = self.create_subscription(
+            TFMessage,
+            '/objects_poses_sim',
+            self._sim_pose_callback,
+            10
+        )
+        self.pose_subs.append(sub_global)
+        
+        # 2. End Effectors (PoseStamped)
+        for arm in ['panda1', 'panda2']:
+            topic = f'/model/{arm}/link/panda_hand/pose'
+            obj_name = f'{arm}_ee'
+            self.get_logger().info(f'Subscribing to EE pose: {topic}')
             sub = self.create_subscription(
                 PoseStamped,
                 topic,
@@ -186,6 +212,64 @@ class DualPandaIKNode(Node):
             self.pose_subs.append(sub)
             
         self.get_logger().info('Dual Panda IK GUI Node initialized. Receiving ground truth poses...')
+
+    def _sim_pose_callback(self, msg: TFMessage):
+        """Update object poses from global simulation info."""
+        with self.objects_lock:
+            for transform in msg.transforms:
+                # child_frame_id contains the model name (e.g., 'red_block')
+                obj_name = transform.child_frame_id
+                
+                if obj_name in self.objects:
+                    # Update position
+                    trans = transform.transform.translation
+                    self.objects[obj_name]['position'] = [trans.x, trans.y, trans.z]
+                    
+                    # Update Orientation (RPY)
+                    q = [
+                        transform.transform.rotation.x,
+                        transform.transform.rotation.y,
+                        transform.transform.rotation.z,
+                        transform.transform.rotation.w
+                    ]
+                    
+                    # Quat to RPY
+                    sinr_cosp = 2 * (q[3] * q[0] + q[1] * q[2])
+                    cosr_cosp = 1 - 2 * (q[0] * q[0] + q[1] * q[1])
+                    roll = math.atan2(sinr_cosp, cosr_cosp)
+
+                    sinp = 2 * (q[3] * q[1] - q[2] * q[0])
+                    if abs(sinp) >= 1:
+                        pitch = math.copysign(math.pi / 2, sinp)
+                    else:
+                        pitch = math.asin(sinp)
+
+                    siny_cosp = 2 * (q[3] * q[2] + q[0] * q[1])
+                    cosy_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
+                    yaw = math.atan2(siny_cosp, cosy_cosp)
+                    
+                    self.objects[obj_name]['yaw'] = yaw
+                    self.objects[obj_name]['rpy'] = [roll, pitch, yaw]
+
+    def _wait_for_future(self, future, timeout_sec=None):
+        """Wait for future to complete without spinning the node."""
+        import time
+        start_time = time.time()
+        while not future.done():
+            if timeout_sec is not None and (time.time() - start_time) > timeout_sec:
+                return False
+            time.sleep(0.01)
+        return True
+
+    def get_ee_pose(self, arm: str) -> List[float]:
+        """Get current EE pose [x, y, z, roll, pitch, yaw] from bridged topic."""
+        obj_name = f'{arm}_ee'
+        data = self.get_pose(obj_name)
+        if data and 'rpy' in data:
+            p = data['position']
+            rpy = data['rpy']
+            return [p[0], p[1], p[2], rpy[0], rpy[1], rpy[2]]
+        return None
 
     def _pose_callback(self, msg: PoseStamped, obj_name: str):
         """Update object pose from ground truth."""
@@ -198,19 +282,30 @@ class DualPandaIKNode(Node):
                     msg.pose.position.z
                 ]
                 
-                # Update Yaw from Quaternion
+                # Update Orientation
                 q = [
                     msg.pose.orientation.x,
                     msg.pose.orientation.y,
                     msg.pose.orientation.z,
                     msg.pose.orientation.w
                 ]
-                # Manual yaw calculation to avoid numpy issues
-                siny_cosp = 2.0 * (q[3] * q[2] + q[0] * q[1])
-                cosy_cosp = 1.0 - 2.0 * (q[1] * q[1] + q[2] * q[2])
+                # Calculate Roll, Pitch, Yaw
+                sinr_cosp = 2 * (q[3] * q[0] + q[1] * q[2])
+                cosr_cosp = 1 - 2 * (q[0] * q[0] + q[1] * q[1])
+                roll = math.atan2(sinr_cosp, cosr_cosp)
+
+                sinp = 2 * (q[3] * q[1] - q[2] * q[0])
+                if abs(sinp) >= 1:
+                    pitch = math.copysign(math.pi / 2, sinp)
+                else:
+                    pitch = math.asin(sinp)
+
+                siny_cosp = 2 * (q[3] * q[2] + q[0] * q[1])
+                cosy_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
                 yaw = math.atan2(siny_cosp, cosy_cosp)
                 
                 self.objects[obj_name]['yaw'] = yaw
+                self.objects[obj_name]['rpy'] = [roll, pitch, yaw]
 
     def get_pose(self, object_name: str) -> dict:
         """Get the latest pose of an object (thread-safe)."""
@@ -271,7 +366,8 @@ class DualPandaIKNode(Node):
         request.ik_request.pose_stamped = pose_stamped
 
         future = ik_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future)
+        if not self._wait_for_future(future, timeout_sec=2.0):
+            raise RuntimeError('IK service timed out')
         response = future.result()
 
         if not response:
@@ -308,7 +404,8 @@ class DualPandaIKNode(Node):
             return False
 
         future = traj_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future)
+        if not self._wait_for_future(future, timeout_sec=1.0):
+            return False
         goal_handle = future.result()
 
         if not goal_handle.accepted:
@@ -316,7 +413,8 @@ class DualPandaIKNode(Node):
             return False
 
         res_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, res_future)
+        if not self._wait_for_future(res_future):
+            return False
         result = res_future.result()
         
         if result.result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
@@ -338,7 +436,9 @@ class DualPandaIKNode(Node):
             return
 
         future = gripper_client.send_goal_async(goal)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+        if not self._wait_for_future(future, timeout_sec=3.0):
+            self.get_logger().error(f'Gripper goal timed out for {arm}.')
+            return
         goal_handle = future.result()
 
         if goal_handle is None:
@@ -349,7 +449,7 @@ class DualPandaIKNode(Node):
             return
 
         result_future = goal_handle.get_result_async()
-        rclpy.spin_until_future_complete(self, result_future, timeout_sec=5.0)
+        self._wait_for_future(result_future, timeout_sec=5.0)
     
     # ------------------------------------------------------------------
     # Planning Scene helpers
@@ -450,7 +550,9 @@ class DualPandaIKNode(Node):
         request.avoid_collisions = True
         
         future = cartesian_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=5.0)
+        if not self._wait_for_future(future, timeout_sec=5.0):
+            self.get_logger().warn('Cartesian path service timed out.')
+            return None
         response = future.result()
         
         if not response:
@@ -788,7 +890,7 @@ class DualPandaIKGUI:
 
         # Title
         title_label = ttk.Label(main_frame, text='Dual Panda Arm Control', font=('Arial', 16, 'bold'))
-        title_label.grid(column=0, row=0, columnspan=2, pady=(0, 20))
+        title_label.grid(column=0, row=0, columnspan=3, pady=(0, 20))
 
         # Create frames for each arm
         panda1_frame = ttk.LabelFrame(main_frame, text='Panda 1', padding=10)
@@ -796,19 +898,27 @@ class DualPandaIKGUI:
         
         panda2_frame = ttk.LabelFrame(main_frame, text='Panda 2', padding=10)
         panda2_frame.grid(column=1, row=1, padx=10, pady=5, sticky='nsew')
+        
+        # Monitor Frame
+        monitor_frame = ttk.LabelFrame(main_frame, text='Live Monitor', padding=10)
+        monitor_frame.grid(column=2, row=1, padx=10, pady=5, sticky='nsew')
 
         main_frame.columnconfigure(0, weight=1)
         main_frame.columnconfigure(1, weight=1)
+        main_frame.columnconfigure(2, weight=1)
 
         # Build Panda 1 controls
         self._build_arm_controls(panda1_frame, 'panda1')
         
         # Build Panda 2 controls
         self._build_arm_controls(panda2_frame, 'panda2')
+        
+        # Build Monitor
+        self._build_monitor(monitor_frame)
 
         # Global controls
         global_frame = ttk.LabelFrame(main_frame, text='Global Controls', padding=10)
-        global_frame.grid(column=0, row=2, columnspan=2, pady=10, sticky='ew')
+        global_frame.grid(column=0, row=2, columnspan=3, pady=10, sticky='ew')
         
         global_buttons = ttk.Frame(global_frame)
         global_buttons.grid(column=0, row=0, sticky='ew')
@@ -817,6 +927,9 @@ class DualPandaIKGUI:
         ttk.Button(global_buttons, text='Move Both to Neutral', command=self.move_both_to_neutral).grid(column=0, row=0, padx=4)
         ttk.Button(global_buttons, text='Open Both Grippers', command=lambda: self._send_gripper_both(0.04)).grid(column=1, row=0, padx=4)
         ttk.Button(global_buttons, text='Close Both Grippers', command=lambda: self._send_gripper_both(0.01)).grid(column=2, row=0, padx=4)
+        
+        # Start Live Update
+        self.root.after(100, self._update_live_monitor)
 
     def _build_arm_controls(self, parent: ttk.Frame, arm: str) -> None:
         """Build control widgets for one arm."""
@@ -1086,6 +1199,68 @@ class DualPandaIKGUI:
                 self.node.get_logger().error(f'Place error: {e}')
 
         threading.Thread(target=place_thread, daemon=True).start()
+
+    def _build_monitor(self, parent: ttk.Frame) -> None:
+        """Build live monitor widgets."""
+        self.monitor_vars = {}
+        
+        objects = ['red_block', 'green_block', 'red_solid', 'green_solid', 'red_hollow', 'green_hollow', 'panda1', 'panda2']
+        
+        row = 0
+        for obj in objects:
+            lbl = ttk.Label(parent, text=f'{obj}:', font=('Arial', 10, 'bold'))
+            lbl.grid(column=0, row=row, sticky='w', pady=2)
+            
+            var = tk.StringVar(value='Waiting...')
+            val_lbl = ttk.Label(parent, textvariable=var, font=('Courier', 9))
+            val_lbl.grid(column=0, row=row+1, sticky='w', padx=10, pady=(0, 8))
+            
+            self.monitor_vars[obj] = var
+            row += 2
+            
+        # Separator
+        ttk.Separator(parent, orient='horizontal').grid(column=0, row=row, sticky='ew', pady=10)
+        row += 1
+        
+        # EE Poses
+        ttk.Label(parent, text='End Effector Poses (TF):', font=('Arial', 10, 'bold')).grid(column=0, row=row, sticky='w', pady=2)
+        row += 1
+        
+        self.ee_vars = {}
+        for arm in ['panda1', 'panda2']:
+            lbl = ttk.Label(parent, text=f'{arm} EE:', font=('Arial', 9, 'italic'))
+            lbl.grid(column=0, row=row, sticky='w')
+            
+            var = tk.StringVar(value='No TF')
+            val_lbl = ttk.Label(parent, textvariable=var, font=('Courier', 9))
+            val_lbl.grid(column=0, row=row+1, sticky='w', padx=10, pady=(0, 8))
+            
+            self.ee_vars[arm] = var
+            row += 2
+
+    def _update_live_monitor(self) -> None:
+        """Update live monitor values."""
+        # Objects
+        for obj_name, var in self.monitor_vars.items():
+            data = self.node.get_pose(obj_name)
+            if data:
+                pos = data['position']
+                yaw = data['yaw']
+                text = f"X:{pos[0]:.2f} Y:{pos[1]:.2f} Z:{pos[2]:.2f}\nYaw:{yaw:.2f}"
+                var.set(text)
+            else:
+                var.set("No Data")
+        
+        # EE Poses
+        for arm, var in self.ee_vars.items():
+            pose = self.node.get_ee_pose(arm)
+            if pose:
+                text = f"X:{pose[0]:.2f} Y:{pose[1]:.2f} Z:{pose[2]:.2f}\nR:{pose[3]:.2f} P:{pose[4]:.2f} Y:{pose[5]:.2f}"
+                var.set(text)
+            else:
+                var.set("No TF")
+        
+        self.root.after(100, self._update_live_monitor)
 
     # ------------------------------------------------------------------
     def run(self) -> None:

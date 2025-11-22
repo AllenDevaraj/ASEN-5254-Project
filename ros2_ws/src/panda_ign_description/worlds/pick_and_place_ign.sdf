@@ -130,6 +130,12 @@
     
     <!-- Red blocks -->
     <model name="red_block">
+      <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+        <publish_link_pose>false</publish_link_pose>
+        <use_pose_vector_msg>false</use_pose_vector_msg>
+        <static_publisher>true</static_publisher>
+        <static_update_frequency>30</static_update_frequency>
+      </plugin>
       <pose>0.4 -0.02 0.225 0 0 0</pose>
       <link name="link">
         <inertial>
@@ -163,6 +169,12 @@
     
     <!-- Green block -->
     <model name="green_block">
+      <plugin filename="gz-sim-pose-publisher-system" name="gz::sim::systems::PosePublisher">
+        <publish_link_pose>false</publish_link_pose>
+        <use_pose_vector_msg>false</use_pose_vector_msg>
+        <static_publisher>true</static_publisher>
+        <static_update_frequency>30</static_update_frequency>
+      </plugin>
       <pose>0.45 0.2 0.225 0 0 0</pose>
       <link name="link">
         <inertial>

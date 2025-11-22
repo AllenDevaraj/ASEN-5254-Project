@@ -157,18 +157,27 @@ def generate_launch_description():
         output='screen'
     )
 
-    # Bridge for Ground Truth Object Poses
-    # Maps Gazebo /model/<name>/pose -> ROS /model/<name>/pose
-    bridge_objects = Node(
+    # Bridge for Ground Truth Poses
+    # Objects: Use global Pose_V -> TFMessage bridge for efficiency
+    bridge_objects_global = Node(
         package='ros_gz_bridge',
         executable='parameter_bridge',
         arguments=[
-            '/model/red_block/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-            '/model/green_block/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-            '/model/red_solid/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-            '/model/green_solid/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-            '/model/red_hollow/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
-            '/model/green_hollow/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/world/pick_and_place_world/pose/info@tf2_msgs/msg/TFMessage[ignition.msgs.Pose_V'
+        ],
+        remappings=[
+            ('/world/pick_and_place_world/pose/info', '/objects_poses_sim')
+        ],
+        output='screen'
+    )
+
+    # End Effectors: Specific link poses (PoseStamped)
+    bridge_ee = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        arguments=[
+            '/model/panda1/link/panda_hand/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
+            '/model/panda2/link/panda_hand/pose@geometry_msgs/msg/PoseStamped[ignition.msgs.Pose',
         ],
         output='screen'
     )
@@ -180,7 +189,8 @@ def generate_launch_description():
 
         # Bridges
         bridge_clock,
-        bridge_objects,
+        bridge_objects_global,
+        bridge_ee,
         
         # Simulation (must start first)
         dual_panda_sim,
