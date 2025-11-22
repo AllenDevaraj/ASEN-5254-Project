@@ -13,7 +13,7 @@ from rclpy.duration import Duration
 from rclpy.node import Node
 from rclpy.action import ActionClient
 
-from control_msgs.action import GripperCommand
+from control_msgs.action import GripperCommand, FollowJointTrajectory
 from geometry_msgs.msg import Pose, PoseStamped
 from moveit_msgs.msg import PlanningScene, CollisionObject, AttachedCollisionObject
 from moveit_msgs.srv import GetPositionIK, GetCartesianPath
@@ -48,11 +48,11 @@ class DualPandaIKNode(Node):
         self.gripper_length = 0.11  # 11cm
         self.neutral_pose: List[float] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]
 
-        # Panda 1 publishers and clients
-        self.joint_pub_panda1 = self.create_publisher(
-            JointTrajectory,
-            '/panda1/panda_arm_controller/joint_trajectory',
-            10,
+        # Panda 1 clients
+        self.traj_client_panda1 = ActionClient(
+            self,
+            FollowJointTrajectory,
+            '/panda1/panda_arm_controller/follow_joint_trajectory',
         )
         self.ik_client_panda1 = self.create_client(GetPositionIK, '/panda1/compute_ik')
         self.gripper_client_panda1 = ActionClient(
@@ -61,11 +61,11 @@ class DualPandaIKNode(Node):
             '/panda1/panda_gripper_controller/gripper_cmd',
         )
 
-        # Panda 2 publishers and clients
-        self.joint_pub_panda2 = self.create_publisher(
-            JointTrajectory,
-            '/panda2/panda_arm_controller/joint_trajectory',
-            10,
+        # Panda 2 clients
+        self.traj_client_panda2 = ActionClient(
+            self,
+            FollowJointTrajectory,
+            '/panda2/panda_arm_controller/follow_joint_trajectory',
         )
         self.ik_client_panda2 = self.create_client(GetPositionIK, '/panda2/compute_ik')
         self.gripper_client_panda2 = ActionClient(
@@ -81,9 +81,11 @@ class DualPandaIKNode(Node):
         if not self.ik_client_panda2.wait_for_service(timeout_sec=10.0):
             self.get_logger().error('Panda2 compute_ik service not available.')
 
-        self.get_logger().info('Waiting for gripper action servers...')
+        self.get_logger().info('Waiting for action servers...')
         self.gripper_client_panda1.wait_for_server(timeout_sec=5.0)
         self.gripper_client_panda2.wait_for_server(timeout_sec=5.0)
+        self.traj_client_panda1.wait_for_server(timeout_sec=5.0)
+        self.traj_client_panda2.wait_for_server(timeout_sec=5.0)
         
         # Planning scene publishers
         self.planning_scene_pub_panda1 = self.create_publisher(
@@ -207,6 +209,13 @@ class DualPandaIKNode(Node):
                 
                 self.objects[obj_name]['yaw'] = yaw
 
+    def get_pose(self, object_name: str) -> dict:
+        """Get the latest pose of an object (thread-safe)."""
+        with self.objects_lock:
+            if object_name in self.objects:
+                return self.objects[object_name].copy()
+        return None
+
     def _transform_to_robot_frame(self, world_pose: Pose, arm: str) -> Pose:
         """Transform a pose from world frame to robot base frame."""
         robot = self.robot_poses[arm]
@@ -275,10 +284,11 @@ class DualPandaIKNode(Node):
         except KeyError as exc:
             raise RuntimeError(f'Missing joint in IK solution: {exc}') from exc
 
-    def send_joint_trajectory(self, joint_positions: List[float], arm: str = 'panda1', seconds: float = 3.0) -> None:
-        """Send joint trajectory to specified arm."""
-        joint_pub = self.joint_pub_panda1 if arm == 'panda1' else self.joint_pub_panda2
+    def send_joint_trajectory(self, joint_positions: List[float], arm: str = 'panda1', seconds: float = 3.0) -> bool:
+        """Send joint trajectory to specified arm and wait for completion."""
+        traj_client = self.traj_client_panda1 if arm == 'panda1' else self.traj_client_panda2
         
+        goal = FollowJointTrajectory.Goal()
         traj = JointTrajectory()
         traj.joint_names = self.joint_names
 
@@ -287,8 +297,30 @@ class DualPandaIKNode(Node):
         point.time_from_start.sec = int(seconds)
         point.time_from_start.nanosec = int((seconds - int(seconds)) * 1e9)
         traj.points.append(point)
+        
+        goal.trajectory = traj
+        
+        if not traj_client.wait_for_server(timeout_sec=1.0):
+            self.get_logger().warn(f'Trajectory action server unavailable for {arm}.')
+            return False
 
-        joint_pub.publish(traj)
+        future = traj_client.send_goal_async(goal)
+        rclpy.spin_until_future_complete(self, future)
+        goal_handle = future.result()
+
+        if not goal_handle.accepted:
+            self.get_logger().error(f'Trajectory goal rejected for {arm}.')
+            return False
+
+        res_future = goal_handle.get_result_async()
+        rclpy.spin_until_future_complete(self, res_future)
+        result = res_future.result()
+        
+        if result.result.error_code != FollowJointTrajectory.Result.SUCCESSFUL:
+             self.get_logger().warn(f'Trajectory execution failed with error code: {result.result.error_code}')
+             return False
+             
+        return True
 
     def send_gripper_goal(self, width: float, arm: str = 'panda1') -> None:
         """Send gripper command to specified arm."""
@@ -446,12 +478,10 @@ class DualPandaIKNode(Node):
         4. Grasp (close gripper, attach object)
         5. Linear retreat (lift 15cm up)
         """
-        with self.objects_lock:
-            if object_name not in self.objects:
-                self.get_logger().error(f'Unknown object: {object_name}')
-                return False
-            
-            obj_data = self.objects[object_name].copy()
+        obj_data = self.get_pose(object_name)
+        if not obj_data:
+            self.get_logger().error(f'Unknown object: {object_name}')
+            return False
         
         # Use raw center position from SDF
         obj_world_pos = obj_data['position']
@@ -485,8 +515,13 @@ class DualPandaIKNode(Node):
             # Need to adjust yaw relative to robot
             # Target World Yaw = obj_yaw
             # Target Local Yaw = obj_yaw - robot_yaw
-            # ADD 45 DEGREE OFFSET to align fingers with faces (Panda gripper fingers are diagonal in default frame?)
-            target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw'] + math.pi / 4
+            # Align fingers with object axes
+            # Smart Axis Alignment: Grasp the SHORTEST dimension
+            target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw']
+            
+            if obj_size[1] > obj_size[0]:
+                # Object is longer in Y (width > length). Rotate 90 deg to grasp the X-width.
+                target_yaw_local += (math.pi / 2.0)
             
             qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
             pre_grasp_pose.orientation.x = qx
@@ -499,14 +534,48 @@ class DualPandaIKNode(Node):
             # Ensure we use panda_link0 as base frame
             pre_grasp_joints = self.compute_ik(pre_grasp_pose, arm=arm, base_frame='panda_link0')
             self.send_joint_trajectory(pre_grasp_joints, arm=arm, seconds=3.0)
-            time.sleep(3.5)
             
-            # Step 3: Linear descent to object center (cartesian path)
+            # --- RE-READ POSE for Real-Time Precision ---
+            # This ensures that if the object moved during approach, we descend to the new location.
+            obj_data = self.get_pose(object_name)
+            
+            # Update world position from fresh perception data
+            obj_world_pos = obj_data['position']
+            obj_center_z_world = obj_world_pos[2] # Use exact Z
+            
+            # Update Yaw (Grasp Synthesis)
+            obj_yaw = obj_data['yaw']
+            target_yaw_local = obj_yaw - self.robot_poses[arm]['yaw']
+            
+            if obj_size[1] > obj_size[0]:
+                 # Object is longer in Y. Rotate 90 deg to grasp the X-width.
+                 target_yaw_local += (math.pi / 2.0)
+            
+            qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
+            
+            self.get_logger().info(f'{arm}: Re-read target pose: {obj_world_pos}')
+            # --------------------------------------------
+            
+            # Step 3: Correction & Descent
+            # 3a. Calculate New Pre-Grasp (Hover above new location)
+            # Recalculate Z top based on new center Z to maintain safe hover
+            new_obj_top_z = obj_center_z_world + obj_size[2] / 2
+            
+            world_new_pre_grasp = Pose()
+            world_new_pre_grasp.position.x = obj_world_pos[0]
+            world_new_pre_grasp.position.y = obj_world_pos[1]
+            world_new_pre_grasp.position.z = new_obj_top_z + 0.15 # Maintain 15cm hover
+            
+            new_pre_grasp_pose = self._transform_to_robot_frame(world_new_pre_grasp, arm)
+            new_pre_grasp_pose.orientation.x = qx
+            new_pre_grasp_pose.orientation.y = qy
+            new_pre_grasp_pose.orientation.z = qz
+            new_pre_grasp_pose.orientation.w = qw
+
+            # 3b. Calculate New Grasp Pose (At object center)
             grasp_pose = Pose()
-            grasp_pose.position = pre_grasp_pose.position
-            # We want the gripper FINGERTIPS to be at object center
-            # So TCP (wrist) should be at Object Center + Gripper Length
-            # Transform object center to local frame
+            grasp_pose.orientation = new_pre_grasp_pose.orientation
+            
             world_center_pose = Pose()
             world_center_pose.position.x = obj_world_pos[0]
             world_center_pose.position.y = obj_world_pos[1]
@@ -515,14 +584,15 @@ class DualPandaIKNode(Node):
             local_center = self._transform_to_robot_frame(world_center_pose, arm)
             
             # TCP Target = Center + Gripper Length
+            grasp_pose.position.x = local_center.position.x
+            grasp_pose.position.y = local_center.position.y
             grasp_pose.position.z = local_center.position.z + self.gripper_length
-            grasp_pose.orientation = pre_grasp_pose.orientation
             
-            self.get_logger().info(f'{arm}: Linear descent to grasp pose (TCP z={grasp_pose.position.z:.3f})...')
-            waypoints = [pre_grasp_pose, grasp_pose]
+            self.get_logger().info(f'{arm}: Adjusting hover & descending to (TCP z={grasp_pose.position.z:.3f})...')
+            # Path: Current -> New Pre-Grasp -> Grasp
+            waypoints = [new_pre_grasp_pose, grasp_pose]
             grasp_joints = self._compute_cartesian_path(waypoints, arm=arm)
-            self.send_joint_trajectory(grasp_joints, arm=arm, seconds=2.0)
-            time.sleep(2.5)
+            self.send_joint_trajectory(grasp_joints, arm=arm, seconds=3.0)
             
             # Step 4: Grasp (close gripper and attach object)
             self.get_logger().info(f'{arm}: Closing gripper to grasp object...')
@@ -558,7 +628,6 @@ class DualPandaIKNode(Node):
             lift_waypoints = [grasp_pose, lift_pose]
             lift_joints = self._compute_cartesian_path(lift_waypoints, arm=arm)
             self.send_joint_trajectory(lift_joints, arm=arm, seconds=2.0)
-            time.sleep(2.5)
             
             self.get_logger().info(f'{arm}: Pick complete!')
             return True
