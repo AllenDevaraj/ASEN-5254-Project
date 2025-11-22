@@ -523,6 +523,9 @@ class DualPandaIKNode(Node):
                 # Object is longer in Y (width > length). Rotate 90 deg to grasp the X-width.
                 target_yaw_local += (math.pi / 2.0)
             
+            # Add user requested 45 deg offset
+            target_yaw_local += (math.pi / 4.0)
+            
             qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
             pre_grasp_pose.orientation.x = qx
             pre_grasp_pose.orientation.y = qy
@@ -550,6 +553,9 @@ class DualPandaIKNode(Node):
             if obj_size[1] > obj_size[0]:
                  # Object is longer in Y. Rotate 90 deg to grasp the X-width.
                  target_yaw_local += (math.pi / 2.0)
+            
+            # Add user requested 45 deg offset
+            target_yaw_local += (math.pi / 4.0)
             
             qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
             
