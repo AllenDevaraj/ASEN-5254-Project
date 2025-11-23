@@ -297,6 +297,7 @@ class DualPandaIKNode(Node):
         """Call FK service asynchronously."""
         client = self.fk_client_panda1 if arm == 'panda1' else self.fk_client_panda2
         if not client.service_is_ready():
+            # self.get_logger().warn(f'FK service for {arm} not ready')
             return
 
         req = GetPositionFK.Request()
@@ -363,12 +364,17 @@ class DualPandaIKNode(Node):
                     w_pitch = l_pitch
                     
                     self.ee_poses[arm] = [wx, wy, wz, w_roll, w_pitch, w_yaw]
+            else:
+                self.get_logger().error(f'FK service returned error code {resp.error_code.val} for {arm}')
         except Exception as e:
-            pass # calc fail
+            self.get_logger().error(f'FK callback exception for {arm}: {e}')
 
     def get_ee_pose(self, arm: str) -> List[float]:
         """Get current EE pose from stored FK result."""
-        return self.ee_poses.get(arm)
+        pose = self.ee_poses.get(arm)
+        if pose is None:
+             self.get_logger().warn(f'get_ee_pose({arm}) returning None! FK might not be running.')
+        return pose
 
     def _pose_callback(self, msg: PoseStamped, obj_name: str):
         """Update object pose from ground truth."""
@@ -528,7 +534,7 @@ class DualPandaIKNode(Node):
         
         goal = GripperCommand.Goal()
         goal.command.position = width
-        goal.command.max_effort = 20.0
+        goal.command.max_effort = 100.0
 
         if not gripper_client.wait_for_server(timeout_sec=1.0):
             self.get_logger().warn(f'Gripper action server unavailable for {arm}.')
@@ -634,6 +640,57 @@ class DualPandaIKNode(Node):
         import time
         time.sleep(1.0)
     
+    def update_collision_bubbles(self):
+        """Update collision bubbles for other robot hand."""
+        # Panda 2 Bubble in Panda 1 Scene
+        p2_pose = self.ee_poses.get('panda2')
+        if p2_pose:
+            # P2 in World -> P1 Local
+            # P1 Base: 0, 0.15, 0
+            lx = p2_pose[0]
+            ly = p2_pose[1] - 0.15
+            lz = p2_pose[2]
+            self._publish_bubble('panda1', 'panda2_hand', [lx, ly, lz], 0.15)
+
+        # Panda 1 Bubble in Panda 2 Scene
+        p1_pose = self.ee_poses.get('panda1')
+        if p1_pose:
+            # P1 in World -> P2 Local
+            # P2 Base: 1.4, -0.15, 0, Yaw=pi
+            # LocalX = 1.4 - WorldX
+            # LocalY = -(WorldY + 0.15)
+            lx = 1.4 - p1_pose[0]
+            ly = -(p1_pose[1] + 0.15)
+            lz = p1_pose[2]
+            self._publish_bubble('panda2', 'panda1_hand', [lx, ly, lz], 0.15)
+
+    def _publish_bubble(self, target_arm: str, id: str, pos: list, radius: float):
+        scene_pub = self.planning_scene_pub_panda1 if target_arm == 'panda1' else self.planning_scene_pub_panda2
+        
+        scene = PlanningScene()
+        scene.is_diff = True
+        
+        obj = CollisionObject()
+        obj.header.frame_id = 'panda_link0'
+        obj.id = id
+        obj.operation = CollisionObject.ADD
+        
+        primitive = SolidPrimitive()
+        primitive.type = SolidPrimitive.SPHERE
+        primitive.dimensions = [radius]
+        
+        pose = Pose()
+        pose.position.x = pos[0]
+        pose.position.y = pos[1]
+        pose.position.z = pos[2]
+        pose.orientation.w = 1.0
+        
+        obj.primitives = [primitive]
+        obj.primitive_poses = [pose]
+        
+        scene.world.collision_objects.append(obj)
+        scene_pub.publish(scene)
+
     def _compute_cartesian_path(self, waypoints: List[Pose], arm: str = 'panda1') -> List[float]:
         """Compute cartesian path through waypoints."""
         cartesian_client = self.cartesian_path_client_panda1 if arm == 'panda1' else self.cartesian_path_client_panda2
@@ -730,6 +787,9 @@ class DualPandaIKNode(Node):
             # Add user requested 45 deg offset
             target_yaw_local += (math.pi / 4.0)
             
+            # User Request: Fix solid red/green grasping longer faces by adding 90 degree offset.
+            target_yaw_local += (math.pi / 2.0)
+            
             qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
             pre_grasp_pose.orientation.x = qx
             pre_grasp_pose.orientation.y = qy
@@ -760,6 +820,9 @@ class DualPandaIKNode(Node):
             
             # Add user requested 45 deg offset
             target_yaw_local += (math.pi / 4.0)
+            
+            # User Request: Fix solid red/green grasping longer faces by adding 90 degree offset.
+            target_yaw_local += (math.pi / 2.0)
             
             qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, target_yaw_local)
             
@@ -956,6 +1019,124 @@ class DualPandaIKNode(Node):
             self.get_logger().error(f'{arm}: Place failed: {e}')
             return False
 
+    def prepare_for_insertion(self, object_name: str, arm: str = 'panda2') -> bool:
+        """
+        Pick up object and move to assembly pose with 90deg rotation.
+        Hole (initially down/-Z) will face -X (towards Panda 1).
+        """
+        # 1. Pick object
+        if not self.pick_object(object_name, arm=arm):
+            return False
+            
+        # 2. Move to Assembly Pose (Retreat & Rotate)
+        # User Request: Rotate 90 in X axis towards other panda, and go back towards +X axis.
+        # We use the object's pick position as reference, but shift +X.
+        
+        # Get current object position from memory (last known)
+        obj_pos = self.objects[object_name]['position']
+        
+        assembly_pose = Pose()
+        # Move back towards +X (away from center) by 0.1m relative to pick location
+        # Pick location for hollow is approx x=0.9. So target x=1.0.
+        assembly_pose.position.x = obj_pos[0] + 0.1 
+        assembly_pose.position.y = 0.0 # Center in Y
+        assembly_pose.position.z = 0.5 # Lift up higher (0.4 -> 0.5) to avoid table collision during rotation
+        
+        # Orientation: Hole (Grip Z) faces -X World (Towards Panda 1)
+        # Previous attempt (Pitch -90) faced +X (Away from Panda 1).
+        # So we flip it to Pitch +90 deg (1.5708).
+        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
+        assembly_pose.orientation.x = qx
+        assembly_pose.orientation.y = qy
+        assembly_pose.orientation.z = qz
+        assembly_pose.orientation.w = qw
+        
+        # Transform to Robot Frame
+        local_pose = self._transform_to_robot_frame(assembly_pose, arm)
+        
+        self.get_logger().info(f'{arm}: Moving to Assembly Pose (Hole facing -X)...')
+        try:
+            joints = self.compute_ik(local_pose, arm=arm, base_frame='panda_link0')
+            self.send_joint_trajectory(joints, arm=arm, seconds=4.0)
+            
+            # Step 3: Rotate J7 by 45 degrees (User Request)
+            self.get_logger().info(f'{arm}: Rotating J7 by 45 degrees...')
+            # joints is a list of 7 floats. J7 is index 6.
+            new_joints = list(joints)
+            new_joints[6] += (math.pi / 4.0)
+            self.send_joint_trajectory(new_joints, arm=arm, seconds=1.0)
+            
+            return True
+        except Exception as e:
+            self.get_logger().error(f'{arm}: Prep failed: {e}')
+            return False
+
+    def perform_insertion(self, object_name: str, arm: str = 'panda1') -> bool:
+        """
+        Pick object and insert into the other held object (held by Panda 2).
+        """
+        # 1. Pick object
+        if not self.pick_object(object_name, arm=arm):
+            return False
+            
+        # 2. Get Target (Panda 2 EE Pose)
+        other_arm = 'panda2' if arm == 'panda1' else 'panda1'
+        target_data = self.get_ee_pose(other_arm)
+        if not target_data:
+            self.get_logger().error(f'Cannot get pose for {other_arm}!')
+            return False
+            
+        tx, ty, tz, tr, tp, tyaw = target_data
+        
+        # Target Pose = Panda 2 Grip Center (Approx Hole location)
+        target_pose = Pose()
+        target_pose.position.x = tx
+        target_pose.position.y = ty
+        target_pose.position.z = tz
+        
+        # Orientation: Peg Tip (Grip Z) must point +X (Into Hole facing -X)
+        # Pitch +90 deg (1.5708) points Z-up to Z-plus-X.
+        # Roll 0, Yaw 0 ensures squared alignment.
+        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
+        target_pose.orientation.x = qx
+        target_pose.orientation.y = qy
+        target_pose.orientation.z = qz
+        target_pose.orientation.w = qw
+        
+        # 3. Pre-Insert Pose (Offset -15cm in X, approach from -X side towards +X)
+        # Panda 1 is at X=0. Target is at X=0.7.
+        # We start at X=0.55 and move to 0.7.
+        pre_insert_pose = Pose()
+        pre_insert_pose.orientation = target_pose.orientation
+        pre_insert_pose.position.x = tx - 0.15
+        pre_insert_pose.position.y = ty
+        pre_insert_pose.position.z = tz
+        
+        try:
+            # Transform to Robot Frame
+            local_pre = self._transform_to_robot_frame(pre_insert_pose, arm)
+            
+            self.get_logger().info(f'{arm}: Aligning & Moving to Pre-Insert...')
+            joints = self.compute_ik(local_pre, arm=arm, base_frame='panda_link0')
+            self.send_joint_trajectory(joints, arm=arm, seconds=4.0)
+            
+            # 4. Insert (Linear Move to Target)
+            local_target = self._transform_to_robot_frame(target_pose, arm)
+            
+            self.get_logger().info(f'{arm}: Inserting...')
+            waypoints = [local_pre, local_target]
+            joints_ins = self._compute_cartesian_path(waypoints, arm=arm)
+            self.send_joint_trajectory(joints_ins, arm=arm, seconds=3.0)
+            
+            # Release gripper? User didn't specify, but usually insertion ends with release.
+            # I'll leave it held for now as per "insert it" instruction.
+            
+            return True
+        except Exception as e:
+            self.get_logger().error(f'{arm}: Insertion failed: {e}')
+            return False
+
+
 
 class DualPandaIKGUI:
     """Tkinter front-end for controlling both Panda arms."""
@@ -1026,6 +1207,24 @@ class DualPandaIKGUI:
         ttk.Button(global_buttons, text='Move Both to Neutral', command=self.move_both_to_neutral).grid(column=0, row=0, padx=4)
         ttk.Button(global_buttons, text='Open Both Grippers', command=lambda: self._send_gripper_both(0.04)).grid(column=1, row=0, padx=4)
         ttk.Button(global_buttons, text='Close Both Grippers', command=lambda: self._send_gripper_both(0.01)).grid(column=2, row=0, padx=4)
+        
+        # Dual Arm Tasks
+        task_frame = ttk.LabelFrame(main_frame, text='Dual Arm Tasks (Insertion)', padding=10)
+        task_frame.grid(column=0, row=3, columnspan=3, pady=10, sticky='ew')
+        
+        # Panda 2 (Holder)
+        ttk.Label(task_frame, text='Panda 2 (Holder):').grid(column=0, row=0, sticky='w')
+        self.holder_obj_var = tk.StringVar(value='red_hollow')
+        holder_opts = ['red_hollow', 'green_hollow']
+        ttk.Combobox(task_frame, textvariable=self.holder_obj_var, values=holder_opts, state='readonly', width=12).grid(column=1, row=0, padx=4)
+        ttk.Button(task_frame, text='Insert Prep', command=self._insert_prep).grid(column=2, row=0, padx=4)
+        
+        # Panda 1 (Inserter)
+        ttk.Label(task_frame, text='Panda 1 (Inserter):').grid(column=3, row=0, sticky='w', padx=(20, 0))
+        self.inserter_obj_var = tk.StringVar(value='red_solid')
+        inserter_opts = ['red_solid', 'green_solid']
+        ttk.Combobox(task_frame, textvariable=self.inserter_obj_var, values=inserter_opts, state='readonly', width=12).grid(column=4, row=0, padx=4)
+        ttk.Button(task_frame, text='Insert', command=self._do_insertion).grid(column=5, row=0, padx=4)
         
         # Start Live Update
         self.root.after(100, self._update_live_monitor)
@@ -1299,6 +1498,32 @@ class DualPandaIKGUI:
 
         threading.Thread(target=place_thread, daemon=True).start()
 
+    def _insert_prep(self) -> None:
+        """Handle Insert Prep button."""
+        obj = self.holder_obj_var.get()
+        self.status_var_panda2.set(f'Prepping {obj}...')
+        
+        def task():
+            if self.node.prepare_for_insertion(obj, arm='panda2'):
+                self.status_var_panda2.set('Prep Complete. Holding.')
+            else:
+                self.status_var_panda2.set('Prep Failed.')
+        
+        threading.Thread(target=task, daemon=True).start()
+
+    def _do_insertion(self) -> None:
+        """Handle Insert button."""
+        obj = self.inserter_obj_var.get()
+        self.status_var_panda1.set(f'Inserting {obj}...')
+        
+        def task():
+            if self.node.perform_insertion(obj, arm='panda1'):
+                self.status_var_panda1.set('Insertion Complete.')
+            else:
+                self.status_var_panda1.set('Insertion Failed.')
+        
+        threading.Thread(target=task, daemon=True).start()
+
     def _build_monitor(self, parent: ttk.Frame) -> None:
         """Build live monitor widgets."""
         self.monitor_vars = {}
@@ -1367,6 +1592,9 @@ class DualPandaIKGUI:
                 var.set(text)
             else:
                 var.set("No Data")
+        
+        # Update collision bubbles for dynamic avoidance
+        self.node.update_collision_bubbles()
         
         self.root.after(100, self._update_live_monitor)
 

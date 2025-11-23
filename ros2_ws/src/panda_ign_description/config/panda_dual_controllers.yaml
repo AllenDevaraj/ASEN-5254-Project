@@ -1,6 +1,6 @@
 /panda1/controller_manager:
   ros__parameters:
-    update_rate: 100  # Hz
+    update_rate: 1000  # Hz (Increased from 100 to reduce mimic lag)
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
@@ -58,7 +58,7 @@
 
 /panda2/controller_manager:
   ros__parameters:
-    update_rate: 100  # Hz
+    update_rate: 1000  # Hz (Increased from 100)
 
     joint_state_broadcaster:
       type: joint_state_broadcaster/JointStateBroadcaster
