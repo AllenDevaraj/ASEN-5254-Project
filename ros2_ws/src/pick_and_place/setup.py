@@ -43,6 +43,7 @@ setup(
             'panda2_ik_gui = pick_and_place.gui_end_effector:panda2_main',
             'dual_arm_gui = pick_and_place.dual_arm_gui:main',
             'clean_pick_place = pick_and_place.clean_pick_place:main',
+            'joint_state_combiner = pick_and_place.joint_state_combiner:main',
         ],
     },
 

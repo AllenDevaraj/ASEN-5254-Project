@@ -55,7 +55,7 @@ class DualPandaIKNode(Node):
         # When grasping top-down, we must add this to the target Z
         self.gripper_length = 0.11  # 11cm
         self.neutral_pose: List[float] = [0.0, -0.785, 0.0, -2.356, 0.0, 1.57, 0.785]
-        
+
         # Latest Joint States
         self.joint_state_p1 = None
         self.joint_state_p2 = None
@@ -504,7 +504,7 @@ class DualPandaIKNode(Node):
         point.time_from_start.sec = int(seconds)
         point.time_from_start.nanosec = int((seconds - int(seconds)) * 1e9)
         traj.points.append(point)
-        
+
         goal.trajectory = traj
         
         if not traj_client.wait_for_server(timeout_sec=1.0):

@@ -328,6 +328,22 @@
     <limit effort="20." lower="-0.001" upper="0.04" velocity="0.3"/>
     <mimic joint="panda_finger_joint1"/>
   </joint>
+  <!-- Dummy mimic joint/link to mirror right finger (needed for MoveIt unified model) -->
+  <link name="panda_rightfinger_mimic">
+    <inertial>
+      <mass value="1e-06"/>
+      <origin rpy="0 0 0" xyz="0 0 0"/>
+      <inertia ixx="1e-08" ixy="0" ixz="0" iyy="1e-08" iyz="0" izz="1e-08"/>
+    </inertial>
+  </link>
+  <joint name="panda_finger_joint2_mimic" type="prismatic">
+    <parent link="panda_hand"/>
+    <child link="panda_rightfinger_mimic"/>
+    <origin rpy="0 0 0" xyz="0 0 0.0584"/>
+    <axis xyz="0 -1 0"/>
+    <limit effort="20." lower="-0.001" upper="0.04" velocity="0.3"/>
+    <mimic joint="panda_finger_joint1"/>
+  </joint>
   <link name="end_effector_frame">
     <inertial>
       <!-- Dummy inertial parameters to avoid link lumping-->
