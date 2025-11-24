@@ -210,7 +210,7 @@
     <include>
       <uri>model://red_solid</uri>
       <name>red_solid</name>
-      <pose>0.6 -0.2 0.25 0 0 4.7124</pose>
+      <pose>0.6 -0.2 0.25 0 1.5708 4.7124</pose>
     </include>
     
     <!-- Hollow Receptacle for Insertion Task (Red Box) -->
@@ -224,7 +224,7 @@
     <include>
       <uri>model://green_solid</uri>
       <name>green_solid</name>
-      <pose>0.6 0.2 0.25 0 0 4.7124</pose>
+      <pose>0.6 0.2 0.25 0 1.5708 4.7124</pose>
     </include>
 
     <!-- Hollow Receptacle for Insertion Task (Green Box) -->

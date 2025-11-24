@@ -165,13 +165,13 @@ class DualPandaIKNode(Node):
                 'yaw': 0.0
             },
             'red_solid': {
-                'position': [0.6, -0.2, 0.25],  # 80mm x 30mm x 30mm
-                'size': [0.08, 0.03, 0.03],
+                'position': [0.6, -0.2, 0.25],  # Now standing upright (30mm x 30mm x 80mm)
+                'size': [0.03, 0.03, 0.08],  # Updated: Z is now 0.08 (upright)
                 'yaw': 0.0
             },
             'green_solid': {
                 'position': [0.6, 0.2, 0.25],
-                'size': [0.08, 0.03, 0.03],
+                'size': [0.03, 0.03, 0.08],  # Updated: Z is now 0.08 (upright)
                 'yaw': 0.0
             },
             'red_hollow': {
@@ -191,6 +191,9 @@ class DualPandaIKNode(Node):
         
         # Track held objects per arm
         self.held_objects = {'panda1': None, 'panda2': None}
+        
+        # Track published collision object IDs for persistence
+        self.collision_object_ids = {'panda1': set(), 'panda2': set()}
         
         # Initialize planning scene
         self._setup_planning_scene()
@@ -641,28 +644,185 @@ class DualPandaIKNode(Node):
         time.sleep(1.0)
     
     def update_collision_bubbles(self):
-        """Update collision bubbles for other robot hand."""
-        # Panda 2 Bubble in Panda 1 Scene
-        p2_pose = self.ee_poses.get('panda2')
-        if p2_pose:
-            # P2 in World -> P1 Local
-            # P1 Base: 0, 0.15, 0
-            lx = p2_pose[0]
-            ly = p2_pose[1] - 0.15
-            lz = p2_pose[2]
-            self._publish_bubble('panda1', 'panda2_hand', [lx, ly, lz], 0.15)
+        """Update collision objects for full other robot arm (all links)."""
+        # Panda 2 arm in Panda 1 scene (for collision-free planning)
+        if self.joint_state_p2 is not None:
+            self._update_full_arm_collision('panda1', 'panda2', self.joint_state_p2)
+        
+        # Panda 1 arm in Panda 2 scene (bidirectional avoidance)
+        if self.joint_state_p1 is not None:
+            self._update_full_arm_collision('panda2', 'panda1', self.joint_state_p1)
 
-        # Panda 1 Bubble in Panda 2 Scene
-        p1_pose = self.ee_poses.get('panda1')
-        if p1_pose:
-            # P1 in World -> P2 Local
-            # P2 Base: 1.4, -0.15, 0, Yaw=pi
-            # LocalX = 1.4 - WorldX
-            # LocalY = -(WorldY + 0.15)
-            lx = 1.4 - p1_pose[0]
-            ly = -(p1_pose[1] + 0.15)
-            lz = p1_pose[2]
-            self._publish_bubble('panda2', 'panda1_hand', [lx, ly, lz], 0.15)
+    def _update_full_arm_collision(self, target_arm: str, other_arm: str, joint_state):
+        """Update planning scene with full arm representation of other robot."""
+        # Get FK client for the other robot
+        fk_client = self.fk_client_panda1 if other_arm == 'panda1' else self.fk_client_panda2
+        
+        if not fk_client.service_is_ready():
+            return
+        
+        # Request FK for ALL links (including intermediate ones)
+        req = GetPositionFK.Request()
+        req.header.frame_id = 'panda_link0'
+        req.header.stamp = self.get_clock().now().to_msg()
+        req.fk_link_names = [
+            'panda_link1',  # Shoulder
+            'panda_link2',  # Upper arm segment
+            'panda_link3',  # Elbow region
+            'panda_link4',  # Forearm segment
+            'panda_link5',  # Wrist region
+            'panda_link6',  # Wrist segment
+            'panda_link7',  # Wrist
+            'panda_hand'    # Hand
+        ]
+        req.robot_state.joint_state = joint_state
+        
+        # Call FK synchronously (wait for result)
+        future = fk_client.call_async(req)
+        if not self._wait_for_future(future, timeout_sec=0.5):
+            return
+        
+        try:
+            resp = future.result()
+            if resp.error_code.val != resp.error_code.SUCCESS:
+                return
+            
+            # Get robot base poses for transformation
+            target_robot = self.robot_poses[target_arm]
+            other_robot = self.robot_poses[other_arm]
+            
+            scene_pub = self.planning_scene_pub_panda1 if target_arm == 'panda1' else self.planning_scene_pub_panda2
+            scene = PlanningScene()
+            scene.is_diff = True
+            scene.world.collision_objects = []
+            scene.robot_state.is_diff = True
+            
+            # Link names and increased radii (with safety margin)
+            link_info = [
+                ('panda_link1', 0.12),   # Shoulder - increased radius
+                ('panda_link2', 0.10),   # Upper arm segment - NEW
+                ('panda_link3', 0.12),   # Elbow - increased radius
+                ('panda_link4', 0.10),   # Forearm segment - NEW
+                ('panda_link5', 0.12),   # Wrist region - increased radius
+                ('panda_link6', 0.10),   # Wrist segment - NEW
+                ('panda_link7', 0.12),   # Wrist - increased radius
+                ('panda_hand', 0.18),    # Hand - larger sphere with margin
+            ]
+            
+            # Track which objects we're publishing
+            current_ids = set()
+            
+            # Process each link
+            for i, (link_name, radius) in enumerate(link_info):
+                if i < len(resp.pose_stamped):
+                    pose_stamped = resp.pose_stamped[i]
+                    local_pose = pose_stamped.pose
+                    
+                    # Transform from other_arm's base frame to world, then to target_arm's base frame
+                    # Other arm local -> World
+                    cos_yaw_other = math.cos(other_robot['yaw'])
+                    sin_yaw_other = math.sin(other_robot['yaw'])
+                    lx = local_pose.position.x
+                    ly = local_pose.position.y
+                    lz = local_pose.position.z
+                    
+                    # Transform to world
+                    wx = lx * cos_yaw_other - ly * sin_yaw_other + other_robot['x']
+                    wy = lx * sin_yaw_other + ly * cos_yaw_other + other_robot['y']
+                    wz = lz + other_robot['z']
+                    
+                    # Transform to target arm's local frame
+                    # World -> Target local
+                    rel_x = wx - target_robot['x']
+                    rel_y = wy - target_robot['y']
+                    rel_z = wz - target_robot['z']
+                    
+                    # Rotate by -target_yaw
+                    cos_yaw_target = math.cos(-target_robot['yaw'])
+                    sin_yaw_target = math.sin(-target_robot['yaw'])
+                    tx = rel_x * cos_yaw_target - rel_y * sin_yaw_target
+                    ty = rel_x * sin_yaw_target + rel_y * cos_yaw_target
+                    tz = rel_z
+                    
+                    # Create collision object
+                    obj_id = f'{other_arm}_{link_name}'
+                    current_ids.add(obj_id)
+                    
+                    obj = CollisionObject()
+                    obj.header.frame_id = 'panda_link0'
+                    obj.header.stamp = self.get_clock().now().to_msg()
+                    obj.id = obj_id
+                    
+                    # Use MOVE if object already exists, ADD if new (for persistence)
+                    if obj_id in self.collision_object_ids[target_arm]:
+                        obj.operation = CollisionObject.MOVE
+                    else:
+                        obj.operation = CollisionObject.ADD
+                    
+                    primitive = SolidPrimitive()
+                    primitive.type = SolidPrimitive.SPHERE
+                    primitive.dimensions = [radius]
+                    
+                    pose = Pose()
+                    pose.position.x = tx
+                    pose.position.y = ty
+                    pose.position.z = tz
+                    pose.orientation.w = 1.0  # Simplified orientation
+                    
+                    obj.primitives = [primitive]
+                    obj.primitive_poses = [pose]
+                    scene.world.collision_objects.append(obj)
+            
+            # Remove old collision objects that no longer exist
+            old_ids = self.collision_object_ids[target_arm] - current_ids
+            for old_id in old_ids:
+                obj = CollisionObject()
+                obj.header.frame_id = 'panda_link0'
+                obj.header.stamp = self.get_clock().now().to_msg()
+                obj.id = old_id
+                obj.operation = CollisionObject.REMOVE
+                scene.world.collision_objects.append(obj)
+            
+            # Update tracked IDs
+            self.collision_object_ids[target_arm] = current_ids
+            
+            # Include current robot state so MoveIt knows where the robot is
+            # This ensures MoveIt can check collisions correctly
+            current_joint_state = self.joint_state_p1 if target_arm == 'panda1' else self.joint_state_p2
+            if current_joint_state is not None:
+                scene.robot_state.joint_state = current_joint_state
+                scene.robot_state.is_diff = True
+            else:
+                scene.robot_state.is_diff = False
+            
+            # Publish scene with timestamp
+            scene.is_diff = True
+            scene.robot_state.attached_collision_objects = []  # Empty for now
+            scene_pub.publish(scene)
+            
+            # Log for debugging
+            if len(scene.world.collision_objects) > 0:
+                self.get_logger().debug(f'Published {len(scene.world.collision_objects)} collision objects for {other_arm} in {target_arm} scene')
+            
+        except Exception as e:
+            self.get_logger().error(f'Failed to update full arm collision for {other_arm}: {e}')
+
+    def _ensure_collision_objects_published(self, arm: str):
+        """Ensure collision objects are published before planning."""
+        # Force update collision objects (multiple times to ensure they're received)
+        for _ in range(3):
+            self.update_collision_bubbles()
+            import time
+            time.sleep(0.05)  # 50ms between updates
+        
+        # Longer delay to ensure MoveIt receives and processes the scene update
+        import time
+        time.sleep(0.2)  # 200ms delay for scene propagation and processing
+        
+        # Log for debugging
+        other_arm = 'panda2' if arm == 'panda1' else 'panda1'
+        num_objects = len(self.collision_object_ids[arm])
+        self.get_logger().info(f'{arm}: Collision objects published: {num_objects} objects for {other_arm}')
 
     def _publish_bubble(self, target_arm: str, id: str, pos: list, radius: float):
         scene_pub = self.planning_scene_pub_panda1 if target_arm == 'panda1' else self.planning_scene_pub_panda2
@@ -704,6 +864,11 @@ class DualPandaIKNode(Node):
         request.max_step = 0.01
         request.jump_threshold = 0.0
         request.avoid_collisions = True
+        
+        # Include current robot state for accurate collision checking
+        current_joint_state = self.joint_state_p1 if arm == 'panda1' else self.joint_state_p2
+        if current_joint_state is not None:
+            request.start_state.joint_state = current_joint_state
         
         future = cartesian_client.call_async(request)
         if not self._wait_for_future(future, timeout_sec=5.0):
@@ -879,9 +1044,8 @@ class DualPandaIKNode(Node):
             
             # Attach object to gripper (planning scene)
             scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
-            # base_frame = 'panda1_link0' if arm == 'panda1' else 'panda2_link0'
-            # No need for base_frame here, just link names
-            eef_link = 'panda1_hand' if arm == 'panda1' else 'panda2_hand'
+            # Link name in URDF is 'panda_hand' (not namespaced)
+            eef_link = 'panda_hand'
             
             scene = PlanningScene()
             scene.is_diff = True
@@ -890,7 +1054,7 @@ class DualPandaIKNode(Node):
             attached_obj.object.id = object_name
             attached_obj.object.operation = CollisionObject.REMOVE
             attached_obj.link_name = eef_link
-            attached_obj.touch_links = [eef_link, f'{arm}_hand', f'{arm}_leftfinger', f'{arm}_rightfinger']
+            attached_obj.touch_links = [eef_link, 'panda_hand', 'panda_leftfinger', 'panda_rightfinger']
             
             scene.robot_state.attached_collision_objects = [attached_obj]
             scene_pub.publish(scene)
@@ -990,7 +1154,7 @@ class DualPandaIKNode(Node):
             # 4. Detach
             if obj_name != "unknown":
                 scene_pub = self.planning_scene_pub_panda1 if arm == 'panda1' else self.planning_scene_pub_panda2
-                eef_link = 'panda1_hand' if arm == 'panda1' else 'panda2_hand'
+                eef_link = 'panda_hand'  # Link name in URDF is 'panda_hand' (not namespaced)
                 
                 scene = PlanningScene()
                 scene.is_diff = True
@@ -1036,9 +1200,9 @@ class DualPandaIKNode(Node):
         obj_pos = self.objects[object_name]['position']
         
         assembly_pose = Pose()
-        # Move back towards +X (away from center) by 0.1m relative to pick location
-        # Pick location for hollow is approx x=0.9. So target x=1.0.
-        assembly_pose.position.x = obj_pos[0] + 0.1 
+        # Move closer to Panda 1 (from X=1.0 to X=0.75) so Panda 1 can reach
+        # 0.75m is within Panda 1's safe reach range (0.85m max, 75% = safe)
+        assembly_pose.position.x = 0.75 
         assembly_pose.position.y = 0.0 # Center in Y
         assembly_pose.position.z = 0.5 # Lift up higher (0.4 -> 0.5) to avoid table collision during rotation
         
@@ -1073,13 +1237,33 @@ class DualPandaIKNode(Node):
 
     def perform_insertion(self, object_name: str, arm: str = 'panda1') -> bool:
         """
-        Pick object and insert into the other held object (held by Panda 2).
+        Pick object and insert into the hollow object held by Panda 2.
+        Step 1: Align in front of hollow along X-axis (collision-free path)
+        Step 2: Linear insertion along X-axis into the hole
         """
         # 1. Pick object
         if not self.pick_object(object_name, arm=arm):
             return False
+        
+        # 2. Retreat to Safe Position (Lift up and move back towards Panda 1's side)
+        # This avoids trying to plan through Panda 2's arm
+        # Safe position: Back towards Panda 1 (X=0.3), same Y, high Z (0.6)
+        self.get_logger().info(f'{arm}: Retreating to safe position (away from Panda 2)...')
+        
+        safe_retreat_pose = Pose()
+        safe_retreat_pose.position.x = 0.3  # Back towards Panda 1's side
+        safe_retreat_pose.position.y = 0.15  # Panda 1's Y position
+        safe_retreat_pose.position.z = 0.6  # High up, clear of obstacles
+        
+        # Orientation: Keep current orientation (pointing down from pick)
+        # Use standard pick orientation (Roll=180, pointing down)
+        qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, 0.0)
+        safe_retreat_pose.orientation.x = qx
+        safe_retreat_pose.orientation.y = qy
+        safe_retreat_pose.orientation.z = qz
+        safe_retreat_pose.orientation.w = qw
             
-        # 2. Get Target (Panda 2 EE Pose)
+        # 3. Get Target (Panda 2 EE Pose and Hollow Object Info)
         other_arm = 'panda2' if arm == 'panda1' else 'panda1'
         target_data = self.get_ee_pose(other_arm)
         if not target_data:
@@ -1088,49 +1272,127 @@ class DualPandaIKNode(Node):
             
         tx, ty, tz, tr, tp, tyaw = target_data
         
-        # Target Pose = Panda 2 Grip Center (Approx Hole location)
-        target_pose = Pose()
-        target_pose.position.x = tx
-        target_pose.position.y = ty
-        target_pose.position.z = tz
+        # Get hollow object dimensions (held by Panda 2)
+        hollow_name = self.held_objects.get(other_arm)
+        if not hollow_name:
+            self.get_logger().warn(f'{other_arm} is not holding any object. Using default hollow dimensions.')
+            hollow_data = None
+        else:
+            hollow_data = self.get_pose(hollow_name)
+        if not hollow_data:
+            # Fallback: use default dimensions
+            hollow_length = 0.08
+            hollow_width = 0.05
+            hollow_height = 0.05
+        else:
+            hollow_size = hollow_data['size']
+            hollow_length = hollow_size[0]
+            hollow_width = hollow_size[1]
+            hollow_height = hollow_size[2]
         
-        # Orientation: Peg Tip (Grip Z) must point +X (Into Hole facing -X)
-        # Pitch +90 deg (1.5708) points Z-up to Z-plus-X.
-        # Roll 0, Yaw 0 ensures squared alignment.
-        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
-        target_pose.orientation.x = qx
-        target_pose.orientation.y = qy
-        target_pose.orientation.z = qz
-        target_pose.orientation.w = qw
+        # 3. Calculate Hole Position
+        # Panda 2's hand is at (tx, ty, tz)
+        # Hollow object is held, hole faces -X (towards Panda 1)
+        # Hole center is at the front face of the hollow object
+        # Since hollow is rotated Pitch +90 (hole facing -X), the front face is offset
+        # Approximate: hole is at hand position, slightly forward (towards Panda 1)
+        # For simplicity, use Panda 2's hand X as hole X (they're close)
+        hole_x = tx
+        hole_y = ty
+        hole_z = tz
         
-        # 3. Pre-Insert Pose (Offset -15cm in X, approach from -X side towards +X)
-        # Panda 1 is at X=0. Target is at X=0.7.
-        # We start at X=0.55 and move to 0.7.
+        # Get solid object dimensions (being inserted)
+        solid_data = self.get_pose(object_name)
+        if solid_data:
+            solid_size = solid_data['size']
+            solid_length = solid_size[2]  # Z dimension (upright = length)
+        else:
+            solid_length = 0.08  # Default
+        
+        # 4. Pre-Insert Pose (Align in front of hole, 15cm back along X-axis from Panda 1 side)
+        # Hole faces -X, so Panda 1 approaches from X < hole_x
+        # User Request: At least 15cm away from hole
+        # Orientation: Solid pointing along +X (towards hole)
         pre_insert_pose = Pose()
-        pre_insert_pose.orientation = target_pose.orientation
-        pre_insert_pose.position.x = tx - 0.15
-        pre_insert_pose.position.y = ty
-        pre_insert_pose.position.z = tz
+        pre_insert_pose.position.x = hole_x - 0.15  # 15cm in front of hole (towards Panda 1)
+        pre_insert_pose.position.y = hole_y
+        pre_insert_pose.position.z = hole_z
+        
+        # Orientation: Point solid along +X axis (Pitch +90: Z-up -> +X)
+        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
+        pre_insert_pose.orientation.x = qx
+        pre_insert_pose.orientation.y = qy
+        pre_insert_pose.orientation.z = qz
+        pre_insert_pose.orientation.w = qw
+        
+        # 5. Insert Target Pose (Inside the hollow)
+        # User Request: Move forward 15cm linearly from pre-insert position
+        insert_pose = Pose()
+        insert_pose.position.x = pre_insert_pose.position.x + 0.15  # Move forward 15cm from pre-insert
+        insert_pose.position.y = hole_y
+        insert_pose.position.z = hole_z
+        insert_pose.orientation = pre_insert_pose.orientation  # Same orientation
         
         try:
             # Transform to Robot Frame
+            local_safe = self._transform_to_robot_frame(safe_retreat_pose, arm)
             local_pre = self._transform_to_robot_frame(pre_insert_pose, arm)
+            local_insert = self._transform_to_robot_frame(insert_pose, arm)
             
-            self.get_logger().info(f'{arm}: Aligning & Moving to Pre-Insert...')
-            joints = self.compute_ik(local_pre, arm=arm, base_frame='panda_link0')
-            self.send_joint_trajectory(joints, arm=arm, seconds=4.0)
+            # Step 2a: Move to safe position (simple IK, no obstacles)
+            self.get_logger().info(f'{arm}: Moving to safe retreat position...')
+            joints_safe = self.compute_ik(local_safe, arm=arm, base_frame='panda_link0')
+            self.send_joint_trajectory(joints_safe, arm=arm, seconds=3.0)
             
-            # 4. Insert (Linear Move to Target)
-            local_target = self._transform_to_robot_frame(target_pose, arm)
+            # CRITICAL: Ensure collision objects are published before planning approach
+            self.get_logger().info(f'{arm}: Ensuring collision objects are published...')
+            self._ensure_collision_objects_published(arm)
             
-            self.get_logger().info(f'{arm}: Inserting...')
-            waypoints = [local_pre, local_target]
-            joints_ins = self._compute_cartesian_path(waypoints, arm=arm)
-            self.send_joint_trajectory(joints_ins, arm=arm, seconds=3.0)
+            # Step 3: Plan collision-free path from safe position to align in front of hole
+            # Starting from safe position (far from Panda 2) makes planning much easier
+            # The planner can now easily go around Panda 2's arm since we're starting from far away
+            self.get_logger().info(f'{arm}: Planning collision-free path from safe position to align in front of hollow...')
             
-            # Release gripper? User didn't specify, but usually insertion ends with release.
-            # I'll leave it held for now as per "insert it" instruction.
+            # Get current pose at safe position (for Cartesian path planning)
+            current_joint_state = self.joint_state_p1 if arm == 'panda1' else self.joint_state_p2
+            if current_joint_state is None:
+                # Fallback: use IK result as current
+                current_local_pose = local_safe
+            else:
+                # Compute current EE pose in robot frame using FK
+                fk_client = self.fk_client_panda1 if arm == 'panda1' else self.fk_client_panda2
+                if fk_client.service_is_ready():
+                    req_current = GetPositionFK.Request()
+                    req_current.header.frame_id = 'panda_link0'
+                    req_current.header.stamp = self.get_clock().now().to_msg()
+                    req_current.fk_link_names = ['panda_hand']
+                    req_current.robot_state.joint_state = current_joint_state
+                    
+                    future_current = fk_client.call_async(req_current)
+                    if self._wait_for_future(future_current, timeout_sec=1.0):
+                        resp_current = future_current.result()
+                        if resp_current.error_code.val == resp_current.error_code.SUCCESS:
+                            current_local_pose = resp_current.pose_stamped[0].pose
+                        else:
+                            current_local_pose = local_safe
+                    else:
+                        current_local_pose = local_safe
+                else:
+                    current_local_pose = local_safe
             
+            # Plan Cartesian path from safe position to pre-insert
+            # This should easily go around Panda 2's arm since we're starting from far away
+            waypoints_approach = [current_local_pose, local_pre]
+            joints_approach = self._compute_cartesian_path(waypoints_approach, arm=arm)
+            self.send_joint_trajectory(joints_approach, arm=arm, seconds=5.0)
+            
+            # Step 5: Linear insertion along X-axis
+            self.get_logger().info(f'{arm}: Inserting linearly along X-axis...')
+            waypoints_insert = [local_pre, local_insert]
+            joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
+            self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
+            
+            self.get_logger().info(f'{arm}: Insertion complete!')
             return True
         except Exception as e:
             self.get_logger().error(f'{arm}: Insertion failed: {e}')
