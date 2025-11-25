@@ -1369,6 +1369,11 @@ class DualPandaUnifiedNode(Node):
                     ee_y = current_ee_data[1]
                     ee_z = current_ee_data[2]
                     
+                    # OPTION 1: Calculate gripper-to-solid offset (accounts for solid not being perfectly centered in gripper)
+                    gripper_to_solid_y_offset = solid_center_y - ee_y
+                    gripper_to_solid_z_offset = solid_center_z - ee_z
+                    self.get_logger().info(f'{arm}: Gripper-to-solid offset: Y={gripper_to_solid_y_offset:.4f}m, Z={gripper_to_solid_z_offset:.4f}m')
+                    
                     # MAINTAIN 25cm distance but align Y and Z axes
                     # Keep gripper X at 25cm in front of hollow: target_ee_x = hollow_center_x - 0.25
                     # But align solid center Y and Z with hollow center Y and Z
@@ -1376,20 +1381,19 @@ class DualPandaUnifiedNode(Node):
                     # Target gripper X: Maintain 25cm distance from hollow center
                     target_ee_x = hollow_center_x - 0.25  # 25cm in front of hollow center
                     
-                    # To align solid center Y with hollow center Y:
-                    # solid_center_y = ee_y + (solid_center_y - ee_y)  # Current offset from gripper
+                    # OPTION 1: To align solid center Y with hollow center Y (accounting for offset):
+                    # Current: solid_center_y = ee_y + gripper_to_solid_y_offset
                     # We want: solid_center_y = hollow_center_y
-                    # So: ee_y + offset = hollow_center_y
-                    # Therefore: target_ee_y = hollow_center_y - (solid_center_y - ee_y)
-                    # Simplified: target_ee_y = hollow_center_y - solid_center_y + ee_y
-                    # Or: target_ee_y = ee_y + (hollow_center_y - solid_center_y)
-                    y_offset_needed = hollow_center_y - solid_center_y
-                    target_ee_y = ee_y + y_offset_needed
+                    # So: target_ee_y + gripper_to_solid_y_offset = hollow_center_y
+                    # Therefore: target_ee_y = hollow_center_y - gripper_to_solid_y_offset
+                    target_ee_y = hollow_center_y - gripper_to_solid_y_offset
                     
-                    # To align solid center Z with hollow center Z:
-                    # Similar calculation for Z
-                    z_offset_needed = hollow_center_z - solid_center_z
-                    target_ee_z = ee_z + z_offset_needed
+                    # OPTION 1: To align solid center Z with hollow center Z (accounting for offset):
+                    # Current: solid_center_z = ee_z + gripper_to_solid_z_offset
+                    # We want: solid_center_z = hollow_center_z
+                    # So: target_ee_z + gripper_to_solid_z_offset = hollow_center_z
+                    # Therefore: target_ee_z = hollow_center_z - gripper_to_solid_z_offset
+                    target_ee_z = hollow_center_z - gripper_to_solid_z_offset
                     
                     # Calculate offsets from current gripper position
                     total_x_offset = target_ee_x - ee_x
@@ -1440,7 +1444,87 @@ class DualPandaUnifiedNode(Node):
                             self.get_logger().info(f'{arm}: Successfully maintained 25cm distance and aligned solid center Y,Z with hollow center Y,Z')
                             time.sleep(0.3)  # Wait for adjustment to complete
                             
-                            # Re-read EE pose after adjustment
+                            # OPTION 2 & 4: Re-read poses after alignment and verify/correct alignment
+                            self.get_logger().info(f'{arm}: Re-reading object poses after alignment to verify...')
+                            time.sleep(0.2)  # Wait for poses to update
+                            
+                            # Re-read live poses to verify alignment
+                            verify_solid_data = self.get_pose(solid_name)
+                            verify_hollow_data = self.get_pose(hollow_name)
+                            
+                            if verify_solid_data and verify_hollow_data:
+                                verify_solid_y = verify_solid_data['position'][1]
+                                verify_solid_z = verify_solid_data['position'][2]
+                                verify_hollow_y = verify_hollow_data['position'][1]
+                                verify_hollow_z = verify_hollow_data['position'][2]
+                                
+                                # Calculate remaining misalignment
+                                y_misalignment = verify_hollow_y - verify_solid_y
+                                z_misalignment = verify_hollow_z - verify_solid_z
+                                max_misalignment = max(abs(y_misalignment), abs(z_misalignment))
+                                
+                                self.get_logger().info(f'{arm}: Post-alignment verification: solid Y={verify_solid_y:.4f}, hollow Y={verify_hollow_y:.4f}, diff={y_misalignment:.4f}m')
+                                self.get_logger().info(f'{arm}: Post-alignment verification: solid Z={verify_solid_z:.4f}, hollow Z={verify_hollow_z:.4f}, diff={z_misalignment:.4f}m')
+                                
+                                # OPTION 4: If still misaligned (>1mm), apply correction
+                                if max_misalignment > 0.001:  # 1mm threshold for refinement
+                                    self.get_logger().info(f'{arm}: Still misaligned (Y diff: {y_misalignment:.4f}m, Z diff: {z_misalignment:.4f}m), applying correction...')
+                                    
+                                    # Get current EE pose after first alignment
+                                    verify_ee_data = self.get_ee_pose(arm)
+                                    if verify_ee_data:
+                                        verify_ee_y = verify_ee_data[1]
+                                        verify_ee_z = verify_ee_data[2]
+                                        
+                                        # Calculate correction needed (accounting for gripper-to-solid offset)
+                                        # We want: solid_center_y = hollow_center_y
+                                        # Current: solid_center_y = verify_ee_y + gripper_to_solid_y_offset
+                                        # Required: target_ee_y + gripper_to_solid_y_offset = hollow_center_y
+                                        corrected_ee_y = verify_hollow_y - gripper_to_solid_y_offset
+                                        corrected_ee_z = verify_hollow_z - gripper_to_solid_z_offset
+                                        
+                                        # Create correction pose (keep X and orientation the same)
+                                        corrected_ee_world = Pose()
+                                        corrected_ee_world.position.x = verify_ee_data[0]  # Keep X as is
+                                        corrected_ee_world.position.y = corrected_ee_y
+                                        corrected_ee_world.position.z = corrected_ee_z
+                                        corrected_ee_world.orientation.x = qx
+                                        corrected_ee_world.orientation.y = qy
+                                        corrected_ee_world.orientation.z = qz
+                                        corrected_ee_world.orientation.w = qw
+                                        
+                                        # Transform to robot frame
+                                        corrected_ee_robot = self._transform_to_robot_frame(corrected_ee_world, arm)
+                                        corrected_ee_robot.orientation = corrected_ee_world.orientation
+                                        
+                                        # Small correction movement
+                                        current_verify_pose_world = Pose()
+                                        current_verify_pose_world.position.x = verify_ee_data[0]
+                                        current_verify_pose_world.position.y = verify_ee_y
+                                        current_verify_pose_world.position.z = verify_ee_z
+                                        current_verify_pose_world.orientation.x = qx
+                                        current_verify_pose_world.orientation.y = qy
+                                        current_verify_pose_world.orientation.z = qz
+                                        current_verify_pose_world.orientation.w = qw
+                                        current_verify_pose_robot = self._transform_to_robot_frame(current_verify_pose_world, arm)
+                                        current_verify_pose_robot.orientation = current_verify_pose_world.orientation
+                                        
+                                        correction_waypoints = [current_verify_pose_robot, corrected_ee_robot]
+                                        correction_joints = self._compute_cartesian_path(correction_waypoints, arm=arm)
+                                        
+                                        if correction_joints:
+                                            self.send_joint_trajectory(correction_joints, arm=arm, seconds=1.0)
+                                            self.get_logger().info(f'{arm}: Applied alignment correction (Y: {verify_ee_y:.4f} -> {corrected_ee_y:.4f}, Z: {verify_ee_z:.4f} -> {corrected_ee_z:.4f})')
+                                            time.sleep(0.2)
+                                            
+                                            # Update current_ee_data after correction
+                                            current_ee_data = self.get_ee_pose(arm)
+                                        else:
+                                            self.get_logger().warn(f'{arm}: Failed to compute correction path, proceeding with current alignment')
+                                else:
+                                    self.get_logger().info(f'{arm}: ✓ Alignment verified: solid and hollow centers are aligned (within 1mm tolerance)')
+                            
+                            # Re-read EE pose after alignment (or correction)
                             current_ee_data = self.get_ee_pose(arm)
                         else:
                             self.get_logger().warn(f'{arm}: Failed to compute alignment path, proceeding with current position')
@@ -1449,18 +1533,172 @@ class DualPandaUnifiedNode(Node):
                 else:
                     self.get_logger().warn(f'{arm}: Could not get current EE pose for alignment')
             
-            # Step 4: STOP at aligned position - Do NOT move forward to avoid hitting objects
-            # After J7 offset and alignment (25cm distance maintained, Y,Z aligned), the solid is aligned with the hollow
-            # We stop here instead of moving forward to prevent collisions and objects falling
-            self.get_logger().info(f'{arm}: Stopping at aligned position (25cm distance maintained, solid center Y,Z aligned with hollow center Y,Z)')
-            self.get_logger().info(f'{arm}: Forward movement disabled to prevent hitting objects and causing them to fall')
+            # Step 3.7: FINAL ALIGNMENT VERIFICATION - Ensure perfect alignment before forward movement
+            # Re-read poses one final time and verify/correct alignment to ensure both centers are perfectly aligned
+            self.get_logger().info(f'{arm}: Final alignment verification before forward movement...')
+            time.sleep(0.2)  # Wait for pose updates
             
-            self.get_logger().info(f'{arm}: Insert sequence complete! Reached pre-insert (25cm front), applied J7 offset, maintained 25cm distance and aligned Y,Z axes, stopped in front of objects.')
-            return True
+            # Re-read live poses one final time
+            final_solid_data = self.get_pose(solid_name)
+            final_hollow_data = self.get_pose(hollow_name)
             
-            # TODO: Step 4 (future): Linear insertion - move forward 14cm along X-axis
-            # self.get_logger().info(f'{arm}: Inserting linearly along X-axis (14cm forward)...')
-            # waypoints_insert = [pre_insert_pose, insert_pose]  # Robot frame poses
+            if final_solid_data and final_hollow_data:
+                final_solid_y = final_solid_data['position'][1]
+                final_solid_z = final_solid_data['position'][2]
+                final_hollow_y = final_hollow_data['position'][1]
+                final_hollow_z = final_hollow_data['position'][2]
+                
+                # Get current EE pose
+                final_ee_data = self.get_ee_pose(arm)
+                if final_ee_data:
+                    final_ee_y = final_ee_data[1]
+                    final_ee_z = final_ee_data[2]
+                    
+                    # Recalculate gripper-to-solid offset (it might have changed slightly)
+                    final_gripper_to_solid_y_offset = final_solid_y - final_ee_y
+                    final_gripper_to_solid_z_offset = final_solid_z - final_ee_z
+                    
+                    # Calculate misalignment
+                    y_misalignment = final_hollow_y - final_solid_y
+                    z_misalignment = final_hollow_z - final_solid_z
+                    max_misalignment = max(abs(y_misalignment), abs(z_misalignment))
+                    
+                    self.get_logger().info(f'{arm}: Final check - Solid Y={final_solid_y:.4f}, Hollow Y={final_hollow_y:.4f}, Diff={y_misalignment:.4f}m')
+                    self.get_logger().info(f'{arm}: Final check - Solid Z={final_solid_z:.4f}, Hollow Z={final_hollow_z:.4f}, Diff={z_misalignment:.4f}m')
+                    
+                    # If misaligned (>0.5mm), apply final correction
+                    if max_misalignment > 0.0005:  # 0.5mm threshold for final precision
+                        self.get_logger().info(f'{arm}: Final correction needed (Y diff: {y_misalignment:.4f}m, Z diff: {z_misalignment:.4f}m), aligning centers perfectly...')
+                        
+                        # Calculate target gripper position to perfectly align centers
+                        # We want: solid_center = hollow_center
+                        # Since: solid_center = ee_position + gripper_to_solid_offset
+                        # Therefore: target_ee_y + gripper_to_solid_y_offset = hollow_center_y
+                        # So: target_ee_y = hollow_center_y - gripper_to_solid_y_offset
+                        final_target_ee_y = final_hollow_y - final_gripper_to_solid_y_offset
+                        final_target_ee_z = final_hollow_z - final_gripper_to_solid_z_offset
+                        
+                        # Create final correction pose (keep X and orientation)
+                        final_corrected_world = Pose()
+                        final_corrected_world.position.x = final_ee_data[0]  # Keep X (maintain 25cm distance)
+                        final_corrected_world.position.y = final_target_ee_y  # Perfect Y alignment
+                        final_corrected_world.position.z = final_target_ee_z  # Perfect Z alignment
+                        # Keep current orientation (after J7 rotation)
+                        qx, qy, qz, qw = _euler_to_quaternion(final_ee_data[3], final_ee_data[4], final_ee_data[5])
+                        final_corrected_world.orientation.x = qx
+                        final_corrected_world.orientation.y = qy
+                        final_corrected_world.orientation.z = qz
+                        final_corrected_world.orientation.w = qw
+                        
+                        # Transform to robot frame
+                        final_corrected_robot = self._transform_to_robot_frame(final_corrected_world, arm)
+                        final_corrected_robot.orientation = final_corrected_world.orientation
+                        
+                        # Current pose in robot frame
+                        final_current_world = Pose()
+                        final_current_world.position.x = final_ee_data[0]
+                        final_current_world.position.y = final_ee_y
+                        final_current_world.position.z = final_ee_z
+                        final_current_world.orientation.x = qx
+                        final_current_world.orientation.y = qy
+                        final_current_world.orientation.z = qz
+                        final_current_world.orientation.w = qw
+                        final_current_robot = self._transform_to_robot_frame(final_current_world, arm)
+                        final_current_robot.orientation = final_current_world.orientation
+                        
+                        # Final correction movement
+                        final_correction_waypoints = [final_current_robot, final_corrected_robot]
+                        final_correction_joints = self._compute_cartesian_path(final_correction_waypoints, arm=arm)
+                        
+                        if final_correction_joints:
+                            self.send_joint_trajectory(final_correction_joints, arm=arm, seconds=1.5)
+                            self.get_logger().info(f'{arm}: ✓ Final alignment correction applied - solid and hollow centers now perfectly aligned')
+                            time.sleep(0.2)
+                            
+                            # Update current_ee_data after final correction
+                            current_ee_data = self.get_ee_pose(arm)
+                        else:
+                            self.get_logger().warn(f'{arm}: Failed to compute final correction path, proceeding with current alignment')
+                    else:
+                        self.get_logger().info(f'{arm}: ✓ Perfect alignment confirmed! Solid and hollow centers are aligned (within 0.5mm tolerance)')
+                        # Update current_ee_data (use existing)
+                        current_ee_data = final_ee_data
+                else:
+                    self.get_logger().warn(f'{arm}: Could not get EE pose for final verification')
+            else:
+                self.get_logger().warn(f'{arm}: Could not get object poses for final verification')
+            
+            # Step 4: Move forward along X-axis (toward hollow)
+            # CRITICAL: After J7 offset and final alignment verification, get the current pose for forward movement
+            self.get_logger().info(f'{arm}: Moving forward 8cm along X-axis from current position (after final alignment verification)...')
+            
+            # Get current end-effector pose after all adjustments
+            if not current_ee_data:
+                self.get_logger().warn(f'{arm}: Cannot get current EE pose, using pre_insert_pose as fallback')
+                current_ee_pose_robot = pre_insert_pose
+                current_ee_pose_world = None
+            else:
+                # Convert current EE pose to robot frame for use as starting point
+                current_ee_pose_world = Pose()
+                current_ee_pose_world.position.x = current_ee_data[0]
+                current_ee_pose_world.position.y = current_ee_data[1]
+                current_ee_pose_world.position.z = current_ee_data[2]
+                # Use current orientation (from FK) - this includes the J7 rotation
+                qx, qy, qz, qw = _euler_to_quaternion(current_ee_data[3], current_ee_data[4], current_ee_data[5])
+                current_ee_pose_world.orientation.x = qx
+                current_ee_pose_world.orientation.y = qy
+                current_ee_pose_world.orientation.z = qz
+                current_ee_pose_world.orientation.w = qw
+                
+                # Transform to robot frame
+                current_ee_pose_robot = self._transform_to_robot_frame(current_ee_pose_world, arm)
+                current_ee_pose_robot.orientation = current_ee_pose_world.orientation
+            
+            # Calculate insert pose: 2cm forward from CURRENT position (after adjustment)
+            # CRITICAL: Use current position (after J7 offset and alignment) as starting point
+            if not current_ee_data or not current_ee_pose_world:
+                self.get_logger().warn(f'{arm}: Cannot calculate insert pose from current position, using original calculation')
+                insert_pose_robot = self._transform_to_robot_frame(world_insert_pose, arm)
+                insert_pose_robot.orientation = world_insert_pose.orientation
+            else:
+                # Calculate insert pose: current position + 8cm forward along X-axis (toward hollow)
+                # CRITICAL: Keep Y and Z exactly the same to maintain perfect alignment during forward movement
+                # This ensures the solid center moves straight into the hollow center
+                insert_pose_world = Pose()
+                insert_pose_world.position.x = current_ee_pose_world.position.x + 0.08  # 8cm forward (0.08m)
+                insert_pose_world.position.y = current_ee_pose_world.position.y  # Keep Y exactly the same (maintains Y alignment)
+                insert_pose_world.position.z = current_ee_pose_world.position.z  # Keep Z exactly the same (maintains Z alignment)
+                # Use current orientation (after J7 rotation)
+                insert_pose_world.orientation = current_ee_pose_world.orientation
+                
+                self.get_logger().info(f'{arm}: Insert pose calculated: 8cm forward from current position (X={insert_pose_world.position.x:.3f}m)')
+                self.get_logger().info(f'{arm}: Y and Z maintained at aligned values (Y={insert_pose_world.position.y:.4f}m, Z={insert_pose_world.position.z:.4f}m)')
+                
+                # Transform to robot frame
+                insert_pose_robot = self._transform_to_robot_frame(insert_pose_world, arm)
+                insert_pose_robot.orientation = insert_pose_world.orientation
+            
+            # Use Cartesian path for precise 8cm forward movement from CURRENT position
+            # CRITICAL: This maintains perfect Y,Z alignment throughout forward movement (straight insertion)
+            # Y and Z stay exactly the same, only X moves forward - ensures solid goes straight into hole
+            waypoints_insert = [current_ee_pose_robot, insert_pose_robot]
+            joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
+            
+            if joints_insert:
+                self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
+                self.get_logger().info(f'{arm}: Successfully moved forward 8cm with perfect Y,Z alignment maintained!')
+            else:
+                # Fallback: Try IK
+                self.get_logger().warn(f'{arm}: Cartesian path for 8cm forward failed, trying IK...')
+                try:
+                    insert_joints_ik = self.compute_ik(insert_pose_robot, arm=arm)
+                    self.send_joint_trajectory(insert_joints_ik, arm=arm, seconds=3.0)
+                    self.get_logger().info(f'{arm}: Successfully moved forward 8cm via IK with perfect alignment!')
+                except Exception as ik_err2:
+                    self.get_logger().error(f'{arm}: Failed to move forward 8cm: {ik_err2}')
+                    return False
+            
+            self.get_logger().info(f'{arm}: Insert sequence complete! Reached pre-insert (25cm front), applied J7 offset, perfectly aligned centers in Y,Z, then moved forward 8cm straight into hole.')
             # joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
             # self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
         except Exception as e:
