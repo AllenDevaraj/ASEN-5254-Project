@@ -444,7 +444,7 @@ class DualPandaUnifiedNode(Node):
         table_obj.header.frame_id = 'world'
         table_obj.header.stamp = self.get_clock().now().to_msg()
         table_obj.id = 'table'
-        table_obj.operation = CollisionObject.ADD
+        table_obj.operation = CollisionObject.ADD  # Table is static, use ADD
         
         table_primitive = SolidPrimitive()
         table_primitive.type = SolidPrimitive.BOX
@@ -454,13 +454,15 @@ class DualPandaUnifiedNode(Node):
         table_obj.primitive_poses = [self.table_pose]
         scene.world.collision_objects.append(table_obj)
         
-        # Add all objects (WORLD FRAME)
+        # Add all objects (WORLD FRAME) - Use MOVE operation for dynamic updates
+        # First time: ADD, subsequent: MOVE (to update positions)
         for obj_name, obj_data in objects_copy.items():
             obj = CollisionObject()
             obj.header.frame_id = 'world'
             obj.header.stamp = self.get_clock().now().to_msg()
             obj.id = obj_name
-            obj.operation = CollisionObject.ADD
+            # Use MOVE operation to update position dynamically (will ADD if doesn't exist)
+            obj.operation = CollisionObject.MOVE  # MOVE allows updating positions of existing objects
             
             obj_primitive = SolidPrimitive()
             obj_primitive.type = SolidPrimitive.BOX
@@ -483,13 +485,15 @@ class DualPandaUnifiedNode(Node):
             obj.primitive_poses = [world_pose]
             scene.world.collision_objects.append(obj)
         
-        # Publish scene (unified publisher)
-        self.planning_scene_pub.publish(scene)
-        self.get_logger().info('Planning scene published (unified)')
-        
-        # Wait a bit for scene to be processed
+        # Publish scene (unified publisher) - publish multiple times to ensure MoveIt receives it
         import time
-        time.sleep(1.0)
+        for i in range(3):
+            self.planning_scene_pub.publish(scene)
+            time.sleep(0.1)
+        self.get_logger().info(f'Planning scene published (unified) - {len(scene.world.collision_objects)} collision objects (table + {len(scene.world.collision_objects) - 1} objects)')
+        
+        # Wait a bit for scene to be processed by MoveIt
+        time.sleep(0.5)
     
     def get_pose(self, object_name: str) -> dict:
         """Get the latest pose of an object (thread-safe)."""
@@ -1140,7 +1144,7 @@ class DualPandaUnifiedNode(Node):
         safe_retreat_pose = self._transform_to_robot_frame(world_safe_retreat_pose, arm)
         safe_retreat_pose.orientation = world_safe_retreat_pose.orientation  # Keep original orientation
             
-        # 3. Get Live Poses of Both Objects (much simpler than calculating from EE)
+        # 3. Get LIVE hollow object position from Gazebo (CRITICAL: Use live pose, not EE position)
         other_arm = 'panda2' if arm == 'panda1' else 'panda1'
         
         # Get the hollow object that Panda 2 is holding
@@ -1149,13 +1153,13 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().error(f'{other_arm} is not holding any object. Cannot perform insertion.')
             return False
         
-        # Get the solid object that Panda 1 is holding
+        # Get the solid object that Panda 1 is holding (for dimensions)
         solid_name = self.held_objects.get(arm)
         if not solid_name:
             self.get_logger().error(f'{arm} is not holding any object. Cannot perform insertion.')
             return False
         
-        # Get live poses from Gazebo (even when attached, Gazebo should still track them)
+        # Get live poses from Gazebo - CRITICAL: Use live hollow position
         time.sleep(0.2)  # Wait for pose updates
         hollow_data = self.get_pose(hollow_name)
         solid_data = self.get_pose(solid_name)
@@ -1164,65 +1168,37 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().error(f'Could not get live poses for objects. Hollow: {hollow_data is not None}, Solid: {solid_data is not None}')
             return False
         
-        # Extract positions and dimensions
+        # Extract hollow LIVE position (from Gazebo)
         hx, hy, hz = hollow_data['position']
         hollow_size = hollow_data['size']
-        hollow_length, hollow_width, hollow_height = hollow_size[0], hollow_size[1], hollow_size[2]
         
-        sx, sy, sz = solid_data['position']
         solid_size = solid_data['size']
         solid_length, solid_width, solid_height = solid_size[0], solid_size[1], solid_size[2]
         
-        self.get_logger().info(f'{arm}: Hollow object at ({hx:.3f}, {hy:.3f}, {hz:.3f}), size: {hollow_size}')
-        self.get_logger().info(f'{arm}: Solid object at ({sx:.3f}, {sy:.3f}, {sz:.3f}), size: {solid_size}')
+        self.get_logger().info(f'{arm}: Hollow object LIVE position: X={hx:.3f}, Y={hy:.3f}, Z={hz:.3f}')
         
-        # Calculate Hollow Base Position (where hole opening is)
-        # After Insert Prep, hollow object is rotated Pitch=90deg, hole faces -X (toward Panda 1)
-        # Hollow size: [length, width, height] = [0.08, 0.05, 0.05]
-        # The HOLE opening is on the front face (facing -X after rotation)
-        # From the SDF: walls are at ±0.020125 from center, so the opening face is at center ± (length/2)
-        # Since hole faces -X (toward Panda 1), the front face X = center_x - (hollow_length/2)
-        hollow_base_x = hx - (hollow_length / 2.0)
-        hollow_base_y = hy
-        hollow_base_z = hz
+        # Pre-insert position: 25cm in front of hollow along X-axis
+        # Hollow is at x=hx, so 25cm in front (toward Panda 1) is: hx - 0.25
+        pre_insert_x = hx - 0.25  # 25cm in front of hollow
+        pre_insert_y = hy  # Same Y as hollow
+        pre_insert_z = hz  # Same Z as hollow
         
-        # Calculate Solid Base Center Position
-        # Solid object is upright (tallest dimension is Z = 0.08)
-        # Solid size: [length, width, height] = [0.03, 0.03, 0.08]
-        # Base is at bottom: base_z = solid_center_z - (solid_height/2)
-        solid_base_center_x = sx
-        solid_base_center_y = sy
-        solid_base_center_z = sz - (solid_height / 2.0)
+        self.get_logger().info(f'{arm}: Pre-insert target: X={pre_insert_x:.3f} (25cm in front of hollow X={hx:.3f}), Y={pre_insert_y:.3f}, Z={pre_insert_z:.3f}')
         
-        self.get_logger().info(f'{arm}: Hollow base (hole opening) at ({hollow_base_x:.3f}, {hollow_base_y:.3f}, {hollow_base_z:.3f})')
-        self.get_logger().info(f'{arm}: Solid base center at ({solid_base_center_x:.3f}, {solid_base_center_y:.3f}, {solid_base_center_z:.3f})')
-        
-        # 4. Pre-Insert Pose: Position solid base 15cm in front of hollow base (hole opening)
-        # Target: solid_base_center_x = hollow_base_x - 0.15 (15cm in front, toward Panda 1)
-        # The gripper TCP needs to be positioned such that the solid block's base is at the target location
-        # When grasping upright solid: gripper TCP is at solid_center_z + gripper_length
-        # So to position solid_base_center_z at target, we need: gripper_z = target_base_z + (solid_height/2) + gripper_length
+        # Calculate where gripper TCP needs to be for solid object (upright, held horizontally)
+        # Hollow center is at hz (from Gazebo pose, which is the object center)
+        # Solid is upright, and when held by horizontal gripper, solid center = gripper TCP position
+        # To align solid center with hollow center: gripper_z = hz (hollow center Z)
+        # NO offset needed because both are centers
         
         world_pre_insert_pose = Pose()
-        # Position solid BASE 15cm in front of hollow BASE (hole opening)
-        # Target: solid_base_center_x = hollow_base_x - 0.15
-        target_solid_base_x = hollow_base_x - 0.15  # 15cm in front of hole opening (toward Panda 1)
-        target_solid_base_y = hollow_base_y  # Align Y with hole center
-        target_solid_base_z = hollow_base_z  # Align Z height with hole center (hole center is at object center height)
+        world_pre_insert_pose.position.x = pre_insert_x  # 25cm in front of hollow
+        world_pre_insert_pose.position.y = pre_insert_y  # Aligned with hollow Y
+        world_pre_insert_pose.position.z = hz  # Align solid center with hollow center Z (both are centers)
         
-        # Calculate where Panda 1's gripper TCP needs to be:
-        # Solid object is upright, so:
-        # - solid_center_x = solid_base_x (same when upright)
-        # - solid_center_z = solid_base_z + (solid_height/2)
-        # Gripper TCP is at: solid_center_z + gripper_length
-        # Therefore: gripper_z = target_solid_base_z + (solid_height/2) + gripper_length
-        world_pre_insert_pose.position.x = target_solid_base_x  # Same as solid base X (upright)
-        world_pre_insert_pose.position.y = target_solid_base_y  # Align Y with hole center
-        world_pre_insert_pose.position.z = target_solid_base_z + (solid_height / 2.0) + self.gripper_length  # TCP height to position solid base correctly
-        
-        # Orientation: Point peg (solid) toward hole along X-axis
-        # Solid is upright, so we want gripper to point horizontally along +X (toward hole)
-        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)  # Pitch=90deg, pointing horizontally
+        # Orientation: Point gripper horizontally along X-axis (toward hole)
+        # Pitch=90deg (gripper horizontal), Yaw=0deg (pointing straight along X-axis)
+        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)  # Pitch=90deg, Yaw=0deg (straight toward hole)
         world_pre_insert_pose.orientation.x = qx
         world_pre_insert_pose.orientation.y = qy
         world_pre_insert_pose.orientation.z = qz
@@ -1232,43 +1208,187 @@ class DualPandaUnifiedNode(Node):
         pre_insert_pose = self._transform_to_robot_frame(world_pre_insert_pose, arm)
         pre_insert_pose.orientation = world_pre_insert_pose.orientation
         
-        # 5. Insert Target Pose: Solid base aligned with hollow base (hole opening)
+        # 5. Insert Target Pose: Move forward 2cm from pre-insert position
+        # Pre-insert is at: hx - 0.25
+        # Insert should be at: (hx - 0.25) + 0.02 = hx - 0.23 (2cm forward from pre-insert)
         world_insert_pose = Pose()
-        world_insert_pose.position.x = hollow_base_x  # Solid base at hollow base X (hole opening)
-        world_insert_pose.position.y = hollow_base_y  # Align Y with hole center
-        world_insert_pose.position.z = target_solid_base_z + (solid_height / 2.0) + self.gripper_length  # Same height calculation as pre-insert
+        world_insert_pose.position.x = pre_insert_x + 0.02  # 2cm forward from pre-insert (along X-axis)
+        world_insert_pose.position.y = pre_insert_y  # Same Y as pre-insert
+        world_insert_pose.position.z = world_pre_insert_pose.position.z  # Same Z as pre-insert
         world_insert_pose.orientation = world_pre_insert_pose.orientation  # Same orientation
+        
+        self.get_logger().info(f'{arm}: Insert target (2cm forward): X={world_insert_pose.position.x:.3f}, Y={world_insert_pose.position.y:.3f}, Z={world_insert_pose.position.z:.3f}')
         
         # Transform to robot base frame
         insert_pose = self._transform_to_robot_frame(world_insert_pose, arm)
         insert_pose.orientation = world_insert_pose.orientation
         
         try:
+            # CRITICAL: Ensure ALL collision objects are in planning scene:
+            # 1. All 6 objects (red_block, green_block, red_solid, green_solid, red_hollow, green_hollow)
+            # 2. Table
+            # 3. Hollow object held by Panda 2
+            # 4. Both arms (automatic with unified MoveIt, but we ensure joint state is current)
+            self.get_logger().info(f'{arm}: Setting up complete planning scene with all objects and table...')
+            self._setup_planning_scene()  # Add all 6 objects + table
+            time.sleep(0.2)  # Wait for scene to be processed
+            
+            # Add hollow object held by Panda 2 as a collision object
+            self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)
+            time.sleep(0.2)  # Wait for planning scene to be processed
+            
             # Step 2a: Move to safe position (already transformed above)
             self.get_logger().info(f'{arm}: Moving to safe retreat position...')
             joints_safe = self.compute_ik(safe_retreat_pose, arm=arm)  # Uses robot base frame by default
             self.send_joint_trajectory(joints_safe, arm=arm, seconds=3.0)
             
             # Step 3: Plan collision-free path from safe position to align in front of hole
-            # CRITICAL: Ensure MoveIt knows about both arms' current positions for collision checking
-            # The unified joint state should already be included in _compute_cartesian_path,
-            # but we explicitly ensure it's up-to-date by waiting a moment for joint state updates
-            time.sleep(0.1)  # Brief wait to ensure joint_state is current
+            # CRITICAL: Refresh planning scene before planning to ensure all objects are current
+            # Re-read LIVE object poses to ensure we have the latest positions
+            time.sleep(0.2)  # Wait for pose updates
+            updated_hollow_data = self.get_pose(hollow_name)
+            if updated_hollow_data:
+                hollow_data = updated_hollow_data  # Use updated pose
+                self.get_logger().info(f'{arm}: Refreshed hollow pose: ({hollow_data["position"][0]:.3f}, {hollow_data["position"][1]:.3f}, {hollow_data["position"][2]:.3f})')
             
-            self.get_logger().info(f'{arm}: Planning collision-free path from safe position to align in front of hollow...')
+            self._setup_planning_scene()  # Refresh all objects with latest poses
+            self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)  # Update held object
+            time.sleep(0.5)  # Wait for planning scene to be processed by MoveIt
+            
+            self.get_logger().info(f'{arm}: Planning collision-free path around Panda 2 and hollow object...')
             self.get_logger().info(f'{arm}: Using unified joint state (both arms) for collision checking...')
-            waypoints_approach = [safe_retreat_pose, pre_insert_pose]  # Robot frame poses
-            joints_approach = self._compute_cartesian_path(waypoints_approach, arm=arm)
-            self.send_joint_trajectory(joints_approach, arm=arm, seconds=5.0)
             
-            # Step 5: Linear insertion along X-axis
-            self.get_logger().info(f'{arm}: Inserting linearly along X-axis...')
-            waypoints_insert = [pre_insert_pose, insert_pose]  # Robot frame poses
+            # Step 3: Compute collision-free path to pre-insert position (25cm in front of hollow)
+            self.get_logger().info(f'{arm}: Planning collision-free path to pre-insert position (25cm in front of hollow)...')
+            
+            # Try IK first (simpler, might work if path is clear)
+            try:
+                self.get_logger().info(f'{arm}: Attempting IK to pre-insert position...')
+                pre_insert_joints = self.compute_ik(pre_insert_pose, arm=arm)
+                self.send_joint_trajectory(pre_insert_joints, arm=arm, seconds=4.0)
+                self.get_logger().info(f'{arm}: Successfully reached pre-insert position via IK!')
+            except Exception as ik_error:
+                # If IK fails, use Cartesian path planning (better for collision avoidance)
+                self.get_logger().warn(f'{arm}: IK failed, trying Cartesian path planning: {ik_error}')
+                
+                # Use Cartesian path from current position (after safe retreat) to pre-insert
+                waypoints_to_pre_insert = [safe_retreat_pose, pre_insert_pose]
+                joints_to_pre_insert = self._compute_cartesian_path(waypoints_to_pre_insert, arm=arm)
+                
+                if joints_to_pre_insert:
+                    self.send_joint_trajectory(joints_to_pre_insert, arm=arm, seconds=5.0)
+                    self.get_logger().info(f'{arm}: Successfully reached pre-insert position via Cartesian path!')
+                else:
+                    raise RuntimeError('Cartesian path planning failed for pre-insert position')
+            
+            # Step 3.5: Apply 45-degree J7 offset to rotate gripper base straight toward hollow
+            # This rotates the gripper (and held solid object) 45 degrees so its base faces straight to the hollow
+            self.get_logger().info(f'{arm}: Applying 45-degree J7 offset to rotate gripper base straight toward hollow...')
+            time.sleep(0.2)  # Brief wait to ensure previous motion is complete
+            
+            # Get current joint state
+            if not self.joint_state:
+                self.get_logger().warn(f'{arm}: No joint state available for J7 offset')
+            else:
+                try:
+                    # Get current joint positions for this arm
+                    current_joints = []
+                    for joint_name in self.joint_names[arm]:
+                        idx = self.joint_state.name.index(joint_name)
+                        current_joints.append(self.joint_state.position[idx])
+                    
+                    # Apply 45-degree offset to J7 (index 6) - this rotates the gripper base
+                    # J7 rotation will rotate the gripper and held object 45 degrees around the wrist axis
+                    new_joints = list(current_joints)
+                    new_joints[6] += (math.pi / 4.0)  # +45 degrees to rotate gripper base straight
+                    self.send_joint_trajectory(new_joints, arm=arm, seconds=1.0)
+                    self.get_logger().info(f'{arm}: Applied 45-degree J7 offset (J7: {current_joints[6]:.3f} -> {new_joints[6]:.3f}) - gripper base now faces straight toward hollow')
+                    time.sleep(0.5)  # Brief wait after J7 offset to ensure rotation completes
+                    
+                    # CRITICAL: After J7 offset, get the NEW current pose to use as starting point for forward movement
+                    # Wait a moment for joint state to update
+                    time.sleep(0.3)
+                    # Get updated joint state after J7 rotation
+                    if self.joint_state:
+                        updated_joints = []
+                        for joint_name in self.joint_names[arm]:
+                            idx = self.joint_state.name.index(joint_name)
+                            updated_joints.append(self.joint_state.position[idx])
+                        # Recompute the current pose from updated joints using IK/FK
+                        # For now, we'll use the updated joints to compute IK to the same position but with new J7
+                        # Actually, just update pre_insert_pose's orientation implicitly through the joint state
+                except (ValueError, IndexError) as e:
+                    self.get_logger().warn(f'{arm}: Failed to apply J7 offset: {e}')
+            
+            # Step 4: Move forward 2cm along X-axis (toward hollow)
+            # CRITICAL: After J7 offset, the current pose has changed, so we need to compute forward movement
+            # from the ACTUAL current position, not from pre_insert_pose
+            self.get_logger().info(f'{arm}: Moving forward 2cm along X-axis from current position (after J7 offset)...')
+            
+            # Get current end-effector pose after J7 offset
+            current_ee_data = self.get_ee_pose(arm)
+            if not current_ee_data:
+                self.get_logger().warn(f'{arm}: Cannot get current EE pose after J7 offset, using pre_insert_pose as fallback')
+                current_ee_pose_robot = pre_insert_pose
+                current_ee_pose_world = None
+            else:
+                # Convert current EE pose to robot frame for use as starting point
+                current_ee_pose_world = Pose()
+                current_ee_pose_world.position.x = current_ee_data[0]
+                current_ee_pose_world.position.y = current_ee_data[1]
+                current_ee_pose_world.position.z = current_ee_data[2]
+                # Use current orientation (from FK) - this includes the J7 rotation
+                qx, qy, qz, qw = _euler_to_quaternion(current_ee_data[3], current_ee_data[4], current_ee_data[5])
+                current_ee_pose_world.orientation.x = qx
+                current_ee_pose_world.orientation.y = qy
+                current_ee_pose_world.orientation.z = qz
+                current_ee_pose_world.orientation.w = qw
+                
+                # Transform to robot frame
+                current_ee_pose_robot = self._transform_to_robot_frame(current_ee_pose_world, arm)
+                current_ee_pose_robot.orientation = current_ee_pose_world.orientation
+            
+            # Transform insert pose (2cm forward) to robot base frame
+            insert_pose_robot = self._transform_to_robot_frame(world_insert_pose, arm)
+            # CRITICAL: Use the CURRENT orientation (after J7 rotation) for the insert pose
+            # This ensures the gripper maintains the 45-degree rotated orientation during forward movement
+            # The position moves forward 2cm, but orientation stays the same (with J7 rotation applied)
+            if current_ee_data and current_ee_pose_world:
+                # Copy orientation from current pose (after J7 rotation) - this is the rotated orientation
+                insert_pose_robot.orientation = current_ee_pose_robot.orientation
+                self.get_logger().info(f'{arm}: Using J7-rotated orientation for insert pose - gripper base will remain straight toward hollow')
+            else:
+                # Fallback: use original orientation (shouldn't happen, but just in case)
+                self.get_logger().warn(f'{arm}: Falling back to original orientation for insert pose')
+                insert_pose_robot.orientation = world_insert_pose.orientation
+            
+            # Use Cartesian path for precise 2cm forward movement from CURRENT position (after J7 offset)
+            # This maintains the J7-rotated orientation throughout the forward movement
+            waypoints_insert = [current_ee_pose_robot, insert_pose_robot]
             joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
-            self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
             
-            self.get_logger().info(f'{arm}: Insertion complete!')
+            if joints_insert:
+                self.send_joint_trajectory(joints_insert, arm=arm, seconds=2.0)
+                self.get_logger().info(f'{arm}: Successfully moved forward 2cm!')
+            else:
+                # Fallback: Try IK
+                self.get_logger().warn(f'{arm}: Cartesian path for 2cm forward failed, trying IK...')
+                try:
+                    insert_joints_ik = self.compute_ik(insert_pose_robot, arm=arm)
+                    self.send_joint_trajectory(insert_joints_ik, arm=arm, seconds=2.0)
+                    self.get_logger().info(f'{arm}: Successfully moved forward 2cm via IK!')
+                except Exception as ik_err2:
+                    self.get_logger().error(f'{arm}: Failed to move forward 2cm: {ik_err2}')
+                    return False
+            
+            self.get_logger().info(f'{arm}: Insert sequence complete! Moved to pre-insert (25cm front), applied J7 offset, then moved forward 2cm.')
             return True
+            
+            # TODO: Step 4 (future): Linear insertion - move forward 14cm along X-axis
+            # self.get_logger().info(f'{arm}: Inserting linearly along X-axis (14cm forward)...')
+            # waypoints_insert = [pre_insert_pose, insert_pose]  # Robot frame poses
+            # joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
+            # self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
         except Exception as e:
             self.get_logger().error(f'{arm}: Insertion failed: {e}')
             import traceback
@@ -1299,6 +1419,68 @@ class DualPandaUnifiedNode(Node):
         local_pose.orientation = world_pose.orientation
         
         return local_pose
+    
+    def _add_held_object_as_collision(self, arm: str, object_name: str, object_data: dict) -> None:
+        """Add the object held by the other arm as a collision object in the planning scene."""
+        from moveit_msgs.msg import PlanningScene, CollisionObject
+        from shape_msgs.msg import SolidPrimitive
+        
+        # Get the EE pose of the arm holding the object
+        ee_data = self.get_ee_pose(arm)
+        if not ee_data:
+            self.get_logger().warn(f'Cannot get EE pose for {arm} to add held object collision')
+            return
+        
+        ee_x, ee_y, ee_z, ee_roll, ee_pitch, ee_yaw = ee_data
+        
+        # Create collision object for the held object
+        scene = PlanningScene()
+        scene.is_diff = True
+        scene.robot_state.is_diff = True
+        
+        obj = CollisionObject()
+        obj.header.frame_id = 'world'
+        obj.header.stamp = self.get_clock().now().to_msg()
+        obj.id = f'{object_name}_held_by_{arm}'
+        obj.operation = CollisionObject.MOVE  # MOVE to update position dynamically
+        
+        # Create box primitive with object dimensions
+        obj_primitive = SolidPrimitive()
+        obj_primitive.type = SolidPrimitive.BOX
+        obj_primitive.dimensions = object_data['size']
+        
+        # Position the object at the EE location
+        # The object is held by the gripper, so it's at the EE position
+        # Account for orientation if needed (hollow is rotated Pitch=90deg after Insert Prep)
+        obj_pose = Pose()
+        obj_pose.position.x = ee_x
+        obj_pose.position.y = ee_y
+        obj_pose.position.z = ee_z
+        
+        # Use the object's orientation (from Insert Prep: Pitch=90deg for hollow)
+        # For hollow objects held by Panda 2, they should be rotated Pitch=90deg
+        if 'hollow' in object_name:
+            # Hollow is rotated Pitch=90deg (1.5708 rad) to face -X
+            qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
+            obj_pose.orientation.x = qx
+            obj_pose.orientation.y = qy
+            obj_pose.orientation.z = qz
+            obj_pose.orientation.w = qw
+        else:
+            # Use identity orientation
+            obj_pose.orientation.w = 1.0
+        
+        obj.primitives = [obj_primitive]
+        obj.primitive_poses = [obj_pose]
+        
+        scene.world.collision_objects.append(obj)
+        
+        # Publish to planning scene - publish multiple times to ensure MoveIt receives it
+        import time
+        for i in range(3):
+            self.planning_scene_pub.publish(scene)
+            time.sleep(0.05)
+        self.get_logger().info(f'Updated {object_name} held by {arm} as collision object at ({ee_x:.3f}, {ee_y:.3f}, {ee_z:.3f})')
     
     # ============================================================
     # TODO: Copy remaining methods from dual_arm_gui.py with these changes:
