@@ -257,8 +257,8 @@ class DualPandaUnifiedNode(Node):
         self.objects = {
             'red_block': {'position': [0.4, -0.02, 0.225], 'size': [0.05, 0.05, 0.05], 'yaw': 0.0},
             'green_block': {'position': [0.45, 0.2, 0.225], 'size': [0.05, 0.05, 0.05], 'yaw': 0.0},
-            'red_solid': {'position': [0.6, -0.2, 0.25], 'size': [0.03, 0.03, 0.08], 'yaw': 0.0},
-            'green_solid': {'position': [0.6, 0.2, 0.25], 'size': [0.03, 0.03, 0.08], 'yaw': 0.0},
+            'red_solid': {'position': [0.6, -0.2, 0.25], 'size': [0.025, 0.025, 0.08], 'yaw': 0.0},
+            'green_solid': {'position': [0.6, 0.2, 0.25], 'size': [0.025, 0.025, 0.08], 'yaw': 0.0},
             'red_hollow': {'position': [0.9, -0.2, 0.231], 'size': [0.08, 0.05, 0.05], 'yaw': -1.5708},
             'green_hollow': {'position': [0.9, 0.2, 0.231], 'size': [0.08, 0.05, 0.05], 'yaw': -1.5708}
         }
@@ -277,7 +277,7 @@ class DualPandaUnifiedNode(Node):
         # G_s - solid gripper TCP frame when grasping solid
         
         # Hollow dimensions: [length_x=0.08, width_y=0.05, height_z=0.05]
-        # Solid dimensions: [width_x=0.03, depth_y=0.03, height_z=0.08] (upright)
+        # Solid dimensions: [width_x=0.025, depth_y=0.025, height_z=0.08] (upright)
         
         # ^H T_I: Hollow body frame to insertion frame (at opening face)
         # The opening is on the face with normal pointing toward -X (toward Panda 1)
@@ -1216,7 +1216,7 @@ class DualPandaUnifiedNode(Node):
         hollow_rpy = hollow_data.get('rpy', [0.0, 0.0, hollow_data.get('yaw', 0.0)])
         
         # Extract solid dimensions
-        solid_size = solid_data['size']  # [width_x=0.03, depth_y=0.03, height_z=0.08]
+        solid_size = solid_data['size']  # [width_x=0.025, depth_y=0.025, height_z=0.08]
         solid_height = solid_size[2]  # 0.08m
         
         # Step 1: Create ^W T_H (hollow pose in world)
@@ -1592,9 +1592,19 @@ class DualPandaUnifiedNode(Node):
             else:
                 self.get_logger().info(f'{arm}: J7 offset successfully applied. Ready for linear forward insertion.')
             
+            # CRITICAL: Apply alignment offsets (-1cm Y, +1cm Z) right before linear forward insertion
+            self.get_logger().info(f'{arm}: Applying alignment offsets: -1cm Y, +1cm Z before linear insertion...')
+            alignment_offset_y = 0.0 # -1cm in Y direction (toward -Y)
+            alignment_offset_z = 0.009  # +1cm in Z direction (toward +Z)
+            
+            # Update insert pose with alignment offsets
+            insert_pose.position.y += alignment_offset_y
+            insert_pose.position.z += alignment_offset_z
+            self.get_logger().info(f'{arm}: Adjusted insert pose: Y={insert_pose.position.y:.3f} ({alignment_offset_y*100:.1f}cm), Z={insert_pose.position.z:.3f} (+{alignment_offset_z*100:.1f}cm)')
+            
             # CRITICAL: Break insertion into smaller increments to avoid obstacles
             # Cartesian paths can only go straight, so we'll move forward in smaller steps
-            # Calculate initial distance to target
+            # Calculate initial distance to target (after alignment offsets)
             dx = insert_pose.position.x - current_ee_pose_robot.position.x
             dy = insert_pose.position.y - current_ee_pose_robot.position.y
             dz = insert_pose.position.z - current_ee_pose_robot.position.z

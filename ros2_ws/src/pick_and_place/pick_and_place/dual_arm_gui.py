@@ -165,13 +165,13 @@ class DualPandaIKNode(Node):
                 'yaw': 0.0
             },
             'red_solid': {
-                'position': [0.6, -0.2, 0.25],  # Now standing upright (30mm x 30mm x 80mm)
-                'size': [0.03, 0.03, 0.08],  # Updated: Z is now 0.08 (upright)
+                'position': [0.6, -0.2, 0.25],  # Now standing upright (25mm x 25mm x 80mm)
+                'size': [0.025, 0.025, 0.08],  # Updated: 2.5cm x 2.5cm x 8cm (upright)
                 'yaw': 0.0
             },
             'green_solid': {
                 'position': [0.6, 0.2, 0.25],
-                'size': [0.03, 0.03, 0.08],  # Updated: Z is now 0.08 (upright)
+                'size': [0.025, 0.025, 0.08],  # Updated: 2.5cm x 2.5cm x 8cm (upright)
                 'yaw': 0.0
             },
             'red_hollow': {
