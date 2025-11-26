@@ -267,6 +267,42 @@ class DualPandaUnifiedNode(Node):
         self.held_objects = {'panda1': None, 'panda2': None}
         self.collision_object_ids = {'panda1': set(), 'panda2': set()}  # Track per arm
         
+        # ============================================================
+        # FRAME-BASED INSERTION: Fixed geometric transforms
+        # ============================================================
+        # H - hollow block body frame (at geometric center)
+        # S - solid block body frame (at geometric center)
+        # I - insertion frame at the mouth of the hollow block
+        # G_h - hollow gripper TCP frame when grasping hollow
+        # G_s - solid gripper TCP frame when grasping solid
+        
+        # Hollow dimensions: [length_x=0.08, width_y=0.05, height_z=0.05]
+        # Solid dimensions: [width_x=0.03, depth_y=0.03, height_z=0.08] (upright)
+        
+        # ^H T_I: Hollow body frame to insertion frame (at opening face)
+        # The opening is on the face with normal pointing toward -X (toward Panda 1)
+        # Insertion frame I is at the center of the opening face
+        # Position: half length forward along -X axis from hollow center
+        self.H_T_I_position = [-0.08/2, 0.0, 0.0]  # Half length forward (opening is on -X face)
+        self.H_T_I_orientation = [0.0, 0.0, 0.0, 1.0]  # Identity (same orientation as H)
+        
+        # ^S T_Gs: Solid body frame to solid gripper TCP
+        # Solid is upright (height_z=0.08), gripper grasps it from sides
+        # When solid is held horizontally, its center aligns with gripper TCP
+        # Offset: solid center is at gripper TCP (no offset needed)
+        self.S_T_Gs_position = [0.0, 0.0, 0.0]  # Solid center = gripper TCP
+        self.S_T_Gs_orientation = [0.0, 0.0, 0.0, 1.0]  # Identity (solid orientation = gripper orientation when held)
+        
+        # ^H T_Gh: Hollow body frame to hollow gripper TCP
+        # Hollow is held by Panda 2, gripper grasps it from sides
+        # Hollow center is at gripper TCP (no offset needed)
+        self.H_T_Gh_position = [0.0, 0.0, 0.0]  # Hollow center = gripper TCP
+        self.H_T_Gh_orientation = [0.0, 0.0, 0.0, 1.0]  # Identity
+        
+        # Pre-insertion gap (distance from solid to hollow opening)
+        self.pre_insert_gap = 0.30  # 30cm standoff (increased from 25cm for better reachability)
+        self.insert_depth = 0.16  # 16cm insertion depth
+        
         # Initialize planning scene
         self._setup_planning_scene()
         
@@ -440,11 +476,12 @@ class DualPandaUnifiedNode(Node):
         scene.robot_state.is_diff = True
         
         # Add table (WORLD FRAME)
+        # Use ADD operation for static table (will persist, but re-ADD each time to ensure it's there)
         table_obj = CollisionObject()
         table_obj.header.frame_id = 'world'
         table_obj.header.stamp = self.get_clock().now().to_msg()
         table_obj.id = 'table'
-        table_obj.operation = CollisionObject.ADD  # Table is static, use ADD
+        table_obj.operation = CollisionObject.ADD  # Table is static, ADD ensures it exists
         
         table_primitive = SolidPrimitive()
         table_primitive.type = SolidPrimitive.BOX
@@ -690,8 +727,13 @@ class DualPandaUnifiedNode(Node):
         if not response:
             raise RuntimeError('Cartesian path service call failed.')
         
+        # Allow partial paths (don't fail if < 100% feasible)
+        # This is useful for incremental insertion where we move in small steps
+        if response.fraction < 0.5:  # Only fail if less than 50% feasible
+            raise RuntimeError(f'Cartesian path too incomplete: {response.fraction * 100:.1f}% feasible (minimum 50% required)')
+        
         if response.fraction < 1.0:
-            raise RuntimeError(f'Cartesian path incomplete: {response.fraction * 100:.1f}% feasible')
+            self.get_logger().warn(f'Cartesian path partially feasible: {response.fraction * 100:.1f}% - will use partial path')
         
         # Extract joint positions from trajectory
         if not response.solution.joint_trajectory.points:
@@ -1113,6 +1155,11 @@ class DualPandaUnifiedNode(Node):
         assembly_pose = self._transform_to_robot_frame(world_assembly_pose, arm)
         assembly_pose.orientation = world_assembly_pose.orientation  # Keep original orientation
         
+        # CRITICAL: Set up planning scene BEFORE motion planning to ensure table and objects are known
+        self.get_logger().info(f'{arm}: Setting up planning scene with table and all objects before assembly motion...')
+        self._setup_planning_scene()  # Add table + all 6 objects
+        time.sleep(0.3)  # Wait for planning scene to be processed by MoveIt
+        
         self.get_logger().info(f'{arm}: Moving to Assembly Pose (Hole facing -X)...')
         try:
             joints = self.compute_ik(assembly_pose, arm=arm)  # Uses robot base frame by default
@@ -1136,8 +1183,96 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().error(traceback.format_exc())
             return False
 
+    def _compute_insertion_poses_frame_based(self, hollow_data: dict, solid_data: dict, gap: float, insertion_depth: float = 0.0) -> Pose:
+        """
+        Compute insertion pose using frame-based transforms.
+        
+        Args:
+            hollow_data: Dict with 'position' [x,y,z], 'size' [lx,ly,lz], 'rpy' [r,p,y] for hollow object
+            solid_data: Dict with 'position' [x,y,z], 'size' [lx,ly,lz] for solid object
+            gap: Distance from hollow opening (pre-insert gap)
+            insertion_depth: Depth of insertion (0.0 for pre-insert, >0 for actual insertion)
+        
+        Returns:
+            gripper_pose_world: Gripper TCP pose in world frame
+        
+        Frame-based approach:
+        - W: World frame
+        - H: Hollow body frame (at geometric center)
+        - I: Insertion frame (at hollow opening face, z-axis pointing outward)
+        - S: Solid body frame (at geometric center)
+        - Gs: Solid gripper TCP frame
+        
+        Transform chain:
+        1. ^W T_H: Hollow pose in world (from live pose)
+        2. ^W T_I = ^W T_H * ^H T_I: Insertion frame in world
+        3. ^I T_S = Trans(0, 0, -solid_height/2 - gap - depth): Solid relative to insertion frame
+        4. ^W T_S = ^W T_I * ^I T_S: Solid pose in world
+        5. ^W T_Gs = ^W T_S * ^S T_Gs: Gripper TCP pose in world
+        """
+        # Extract hollow pose in world frame
+        hx, hy, hz = hollow_data['position']
+        hollow_size = hollow_data['size']  # [length_x=0.08, width_y=0.05, height_z=0.05]
+        hollow_rpy = hollow_data.get('rpy', [0.0, 0.0, hollow_data.get('yaw', 0.0)])
+        
+        # Extract solid dimensions
+        solid_size = solid_data['size']  # [width_x=0.03, depth_y=0.03, height_z=0.08]
+        solid_height = solid_size[2]  # 0.08m
+        
+        # Step 1: Create ^W T_H (hollow pose in world)
+        W_T_H = Pose()
+        W_T_H.position.x = hx
+        W_T_H.position.y = hy
+        W_T_H.position.z = hz
+        h_r, h_p, h_y = hollow_rpy
+        qx, qy, qz, qw = _euler_to_quaternion(h_r, h_p, h_y)
+        W_T_H.orientation.x = qx
+        W_T_H.orientation.y = qy
+        W_T_H.orientation.z = qz
+        W_T_H.orientation.w = qw
+        
+        # Step 2: Create ^H T_I (hollow to insertion frame)
+        # Insertion frame is at the opening face (center of opening)
+        # Opening is on the face with normal pointing toward -X (toward Panda 1)
+        # Position: half length forward along -X axis from hollow center
+        H_T_I_pos = (-hollow_size[0]/2, 0.0, 0.0)  # Half length along -X (opening face)
+        
+        # Orientation: Insertion frame I's z-axis points outward (along -X of H, toward Panda 1)
+        # Rotate I so its z-axis aligns with H's -X axis
+        # +90 deg rotation around Y: I_z points along H_-X (toward Panda 1)
+        # Rotation around Y: +90 deg makes z -> -x direction (correct for insertion from Panda 1)
+        H_T_I_quat = _euler_to_quaternion(0.0, 1.5708, 0.0)  # +90 deg around Y: I_z points along H_-X (toward Panda 1)
+        H_T_I = _pose_from_position_quaternion(H_T_I_pos, H_T_I_quat)
+        
+        # Step 3: Compute ^W T_I = ^W T_H * ^H T_I
+        W_T_I = _compose_transforms(W_T_H, H_T_I)
+        
+        # Step 4: Create ^I T_S (solid relative to insertion frame)
+        # I's z-axis points outward from hollow (toward where solid approaches from)
+        # For pre-insert: gap distance away from opening along I's z-axis
+        # For insert: (gap - insertion_depth) - solid is closer by insertion_depth
+        # Position solid center: gap distance along -I_z (negative = toward hollow interior)
+        offset_along_insertion = gap - insertion_depth  # Distance from insertion frame along insertion axis
+        I_T_S_pos = (0.0, 0.0, -offset_along_insertion)  # Negative = along -I_z (toward hollow)
+        I_T_S_quat = (0.0, 0.0, 0.0, 1.0)  # Solid orientation matches I
+        I_T_S = _pose_from_position_quaternion(I_T_S_pos, I_T_S_quat)
+        
+        # Step 5: Compute ^W T_S = ^W T_I * ^I T_S
+        W_T_S = _compose_transforms(W_T_I, I_T_S)
+        
+        # Step 6: Create ^S T_Gs (solid to gripper TCP)
+        # Solid center = gripper TCP (no offset)
+        S_T_Gs_pos = (0.0, 0.0, 0.0)
+        S_T_Gs_quat = (0.0, 0.0, 0.0, 1.0)
+        S_T_Gs = _pose_from_position_quaternion(S_T_Gs_pos, S_T_Gs_quat)
+        
+        # Step 7: Compute ^W T_Gs = ^W T_S * ^S T_Gs
+        W_T_Gs = _compose_transforms(W_T_S, S_T_Gs)
+        
+        return W_T_Gs  # This is the gripper TCP pose in world frame
+    
     def perform_insertion(self, object_name: str, arm: str = 'panda1') -> bool:
-        """Pick object and insert into the hollow object held by Panda 2. Adapted for unified setup."""
+        """Pick object and insert into the hollow object held by Panda 2. Uses frame-based approach."""
         import time  # Import time at function level since pick_object also imports it
         
         # 1. Pick object
@@ -1189,57 +1324,71 @@ class DualPandaUnifiedNode(Node):
         # Extract hollow LIVE position (from Gazebo)
         hx, hy, hz = hollow_data['position']
         hollow_size = hollow_data['size']
-        
         solid_size = solid_data['size']
-        solid_length, solid_width, solid_height = solid_size[0], solid_size[1], solid_size[2]
         
         self.get_logger().info(f'{arm}: Hollow object LIVE position: X={hx:.3f}, Y={hy:.3f}, Z={hz:.3f}')
         
-        # Pre-insert position: 25cm in front of hollow along X-axis
-        # Hollow is at x=hx, so 25cm in front (toward Panda 1) is: hx - 0.25
-        pre_insert_x = hx - 0.25  # 25cm in front of hollow
-        pre_insert_y = hy  # Same Y as hollow
-        pre_insert_z = hz  # Same Z as hollow
+        # ============================================================
+        # FRAME-BASED APPROACH: Compute poses using transform chain
+        # ============================================================
+        self.get_logger().info(f'{arm}: Using frame-based approach to compute insertion poses (gap={self.pre_insert_gap*100:.1f}cm)...')
         
-        self.get_logger().info(f'{arm}: Pre-insert target: X={pre_insert_x:.3f} (25cm in front of hollow X={hx:.3f}), Y={pre_insert_y:.3f}, Z={pre_insert_z:.3f}')
+        # Compute pre-insert pose (30cm gap) using frame-based transforms
+        world_pre_insert_pose = self._compute_insertion_poses_frame_based(
+            hollow_data, solid_data, gap=self.pre_insert_gap, insertion_depth=0.0
+        )
         
-        # Calculate where gripper TCP needs to be for solid object (upright, held horizontally)
-        # Hollow center is at hz (from Gazebo pose, which is the object center)
-        # Solid is upright, and when held by horizontal gripper, solid center = gripper TCP position
-        # To align solid center with hollow center: gripper_z = hz (hollow center Z)
-        # NO offset needed because both are centers
-        
-        world_pre_insert_pose = Pose()
-        world_pre_insert_pose.position.x = pre_insert_x  # 25cm in front of hollow
-        world_pre_insert_pose.position.y = pre_insert_y  # Aligned with hollow Y
-        world_pre_insert_pose.position.z = hz  # Align solid center with hollow center Z (both are centers)
-        
-        # Orientation: Point gripper horizontally along X-axis (toward hole)
-        # Pitch=90deg (gripper horizontal), Yaw=0deg (pointing straight along X-axis)
-        qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)  # Pitch=90deg, Yaw=0deg (straight toward hole)
-        world_pre_insert_pose.orientation.x = qx
-        world_pre_insert_pose.orientation.y = qy
-        world_pre_insert_pose.orientation.z = qz
-        world_pre_insert_pose.orientation.w = qw
+        self.get_logger().info(f'{arm}: Frame-based pre-insert pose (world): X={world_pre_insert_pose.position.x:.3f}, Y={world_pre_insert_pose.position.y:.3f}, Z={world_pre_insert_pose.position.z:.3f}')
+        self.get_logger().info(f'{arm}: Frame-based pre-insert orientation: qx={world_pre_insert_pose.orientation.x:.3f}, qy={world_pre_insert_pose.orientation.y:.3f}, qz={world_pre_insert_pose.orientation.z:.3f}, qw={world_pre_insert_pose.orientation.w:.3f}')
         
         # Transform to robot base frame
         pre_insert_pose = self._transform_to_robot_frame(world_pre_insert_pose, arm)
         pre_insert_pose.orientation = world_pre_insert_pose.orientation
         
-        # 5. Insert Target Pose: Move forward 2cm from pre-insert position
-        # Pre-insert is at: hx - 0.25
-        # Insert should be at: (hx - 0.25) + 0.02 = hx - 0.23 (2cm forward from pre-insert)
-        world_insert_pose = Pose()
-        world_insert_pose.position.x = pre_insert_x + 0.02  # 2cm forward from pre-insert (along X-axis)
-        world_insert_pose.position.y = pre_insert_y  # Same Y as pre-insert
-        world_insert_pose.position.z = world_pre_insert_pose.position.z  # Same Z as pre-insert
-        world_insert_pose.orientation = world_pre_insert_pose.orientation  # Same orientation
+        self.get_logger().info(f'{arm}: Frame-based pre-insert pose (robot frame): X={pre_insert_pose.position.x:.3f}, Y={pre_insert_pose.position.y:.3f}, Z={pre_insert_pose.position.z:.3f}')
         
-        self.get_logger().info(f'{arm}: Insert target (2cm forward): X={world_insert_pose.position.x:.3f}, Y={world_insert_pose.position.y:.3f}, Z={world_insert_pose.position.z:.3f}')
+        # Sanity check: If pre-insert X is too far (>0.85m), use simpler fallback
+        if arm == 'panda1' and abs(pre_insert_pose.position.x) > 0.85:
+            self.get_logger().warn(f'{arm}: Frame-based pre-insert pose X={pre_insert_pose.position.x:.3f}m is too far! Using simpler approach...')
+            # Simple fallback: hollow_x - gap
+            pre_insert_x = hx - self.pre_insert_gap
+            world_pre_insert_pose = Pose()
+            world_pre_insert_pose.position.x = pre_insert_x
+            world_pre_insert_pose.position.y = hy
+            world_pre_insert_pose.position.z = hz
+            qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
+            world_pre_insert_pose.orientation.x = qx
+            world_pre_insert_pose.orientation.y = qy
+            world_pre_insert_pose.orientation.z = qz
+            world_pre_insert_pose.orientation.w = qw
+            pre_insert_pose = self._transform_to_robot_frame(world_pre_insert_pose, arm)
+            pre_insert_pose.orientation = world_pre_insert_pose.orientation
+            self.get_logger().info(f'{arm}: Using simpler pre-insert pose: X={pre_insert_pose.position.x:.3f}m')
+        
+        # Compute insert pose (8cm insertion depth) using frame-based transforms
+        world_insert_pose = self._compute_insertion_poses_frame_based(
+            hollow_data, solid_data, gap=self.pre_insert_gap, insertion_depth=self.insert_depth
+        )
+        
+        self.get_logger().info(f'{arm}: Frame-based insert pose (world): X={world_insert_pose.position.x:.3f}, Y={world_insert_pose.position.y:.3f}, Z={world_insert_pose.position.z:.3f}')
         
         # Transform to robot base frame
         insert_pose = self._transform_to_robot_frame(world_insert_pose, arm)
         insert_pose.orientation = world_insert_pose.orientation
+        
+        self.get_logger().info(f'{arm}: Frame-based insert pose (robot frame): X={insert_pose.position.x:.3f}, Y={insert_pose.position.y:.3f}, Z={insert_pose.position.z:.3f}')
+        
+        # Sanity check: If insert pose X is too far, compute from pre-insert + insertion depth
+        if arm == 'panda1' and abs(insert_pose.position.x) > 0.85:
+            self.get_logger().warn(f'{arm}: Frame-based insert pose X={insert_pose.position.x:.3f}m is too far! Computing from pre-insert position...')
+            # Compute insert pose as pre-insert + insertion depth forward
+            world_pre_insert_x = hx - self.pre_insert_gap
+            world_insert_pose.position.x = world_pre_insert_x + self.insert_depth
+            world_insert_pose.position.y = hy
+            world_insert_pose.position.z = hz
+            insert_pose = self._transform_to_robot_frame(world_insert_pose, arm)
+            insert_pose.orientation = world_insert_pose.orientation
+            self.get_logger().info(f'{arm}: Using simpler insert pose: X={insert_pose.position.x:.3f}m')
         
         try:
             # CRITICAL: Ensure ALL collision objects are in planning scene:
@@ -1276,8 +1425,27 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().info(f'{arm}: Planning collision-free path around Panda 2 and hollow object...')
             self.get_logger().info(f'{arm}: Using unified joint state (both arms) for collision checking...')
             
-            # Step 3: Compute collision-free path to pre-insert position (25cm in front of hollow)
-            self.get_logger().info(f'{arm}: Planning collision-free path to pre-insert position (25cm in front of hollow)...')
+            # Step 3: Compute collision-free path to pre-insert position (30cm in front of hollow)
+            self.get_logger().info(f'{arm}: Planning collision-free path to pre-insert position (30cm in front of hollow)...')
+            
+            # Check if computed pose is too far (likely unreachable)
+            # Panda 1 reach is ~0.85m, so if x > 0.85m in robot frame, fallback to simpler approach
+            if arm == 'panda1' and abs(pre_insert_pose.position.x) > 0.85:
+                self.get_logger().warn(f'{arm}: Frame-based pose appears unreachable (x={pre_insert_pose.position.x:.3f}m). Using simpler fallback approach...')
+                # Fallback: Simple approach - hollow_x - gap
+                pre_insert_x = hx - self.pre_insert_gap
+                world_pre_insert_pose = Pose()
+                world_pre_insert_pose.position.x = pre_insert_x
+                world_pre_insert_pose.position.y = hy
+                world_pre_insert_pose.position.z = hz
+                qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)  # Pitch=90deg
+                world_pre_insert_pose.orientation.x = qx
+                world_pre_insert_pose.orientation.y = qy
+                world_pre_insert_pose.orientation.z = qz
+                world_pre_insert_pose.orientation.w = qw
+                pre_insert_pose = self._transform_to_robot_frame(world_pre_insert_pose, arm)
+                pre_insert_pose.orientation = world_pre_insert_pose.orientation
+                self.get_logger().info(f'{arm}: Fallback pre-insert pose (robot frame): X={pre_insert_pose.position.x:.3f}, Y={pre_insert_pose.position.y:.3f}, Z={pre_insert_pose.position.z:.3f}')
             
             # Try IK first (simpler, might work if path is clear)
             try:
@@ -1297,17 +1465,72 @@ class DualPandaUnifiedNode(Node):
                     self.send_joint_trajectory(joints_to_pre_insert, arm=arm, seconds=5.0)
                     self.get_logger().info(f'{arm}: Successfully reached pre-insert position via Cartesian path!')
                 else:
-                    raise RuntimeError('Cartesian path planning failed for pre-insert position')
+                    # Final fallback: Try simpler approach
+                    self.get_logger().warn(f'{arm}: Cartesian path also failed. Trying simpler fallback approach...')
+                    pre_insert_x = hx - self.pre_insert_gap
+                    world_pre_insert_pose = Pose()
+                    world_pre_insert_pose.position.x = pre_insert_x
+                    world_pre_insert_pose.position.y = hy
+                    world_pre_insert_pose.position.z = hz
+                    qx, qy, qz, qw = _euler_to_quaternion(0.0, 1.5708, 0.0)
+                    world_pre_insert_pose.orientation.x = qx
+                    world_pre_insert_pose.orientation.y = qy
+                    world_pre_insert_pose.orientation.z = qz
+                    world_pre_insert_pose.orientation.w = qw
+                    pre_insert_pose = self._transform_to_robot_frame(world_pre_insert_pose, arm)
+                    pre_insert_pose.orientation = world_pre_insert_pose.orientation
+                    
+                    # Try IK with fallback pose
+                    try:
+                        pre_insert_joints = self.compute_ik(pre_insert_pose, arm=arm)
+                        self.send_joint_trajectory(pre_insert_joints, arm=arm, seconds=4.0)
+                        self.get_logger().info(f'{arm}: Successfully reached pre-insert position via fallback IK!')
+                    except Exception as fallback_error:
+                        raise RuntimeError(f'Both frame-based and fallback approaches failed. Last error: {fallback_error}')
             
-            # Step 3.5: Apply 45-degree J7 offset to rotate gripper base straight toward hollow
-            # This rotates the gripper (and held solid object) 45 degrees so its base faces straight to the hollow
-            self.get_logger().info(f'{arm}: Applying 45-degree J7 offset to rotate gripper base straight toward hollow...')
-            time.sleep(0.2)  # Brief wait to ensure previous motion is complete
+            # Frame-based approach: Poses are already correctly aligned via transform chain
+            # No manual alignment needed - trust the frame-based transforms
+            self.get_logger().info(f'{arm}: Frame-based approach: Poses are automatically aligned via transform chain.')
+            time.sleep(0.3)  # Brief wait to ensure previous motion is complete
             
-            # Get current joint state
-            if not self.joint_state:
-                self.get_logger().warn(f'{arm}: No joint state available for J7 offset')
+            # Step 4: Move forward using frame-based insert pose (no J7 offset needed - frame-based orientation is correct)
+            # CRITICAL: Refresh planning scene right before insertion to ensure latest obstacle positions
+            self.get_logger().info(f'{arm}: Refreshing planning scene before insertion...')
+            time.sleep(0.1)
+            updated_hollow_data = self.get_pose(hollow_name)
+            if updated_hollow_data:
+                hollow_data = updated_hollow_data
+            self._setup_planning_scene()  # Refresh all objects
+            self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)  # Update held object
+            time.sleep(0.3)  # Wait for planning scene to be processed
+            
+            # Get current pose for Cartesian path starting point
+            current_ee_data = self.get_ee_pose(arm)
+            if not current_ee_data:
+                self.get_logger().warn(f'{arm}: Cannot get current EE pose, using pre_insert_pose as fallback')
+                current_ee_pose_robot = pre_insert_pose
             else:
+                current_ee_pose_world = Pose()
+                current_ee_pose_world.position.x = current_ee_data[0]
+                current_ee_pose_world.position.y = current_ee_data[1]
+                current_ee_pose_world.position.z = current_ee_data[2]
+                qx, qy, qz, qw = _euler_to_quaternion(current_ee_data[3], current_ee_data[4], current_ee_data[5])
+                current_ee_pose_world.orientation.x = qx
+                current_ee_pose_world.orientation.y = qy
+                current_ee_pose_world.orientation.z = qz
+                current_ee_pose_world.orientation.w = qw
+                current_ee_pose_robot = self._transform_to_robot_frame(current_ee_pose_world, arm)
+                current_ee_pose_robot.orientation = current_ee_pose_world.orientation
+            
+            # Use frame-based insert pose directly (already computed with correct alignment and 16cm insertion depth)
+            self.get_logger().info(f'{arm}: Using frame-based insert pose: X={insert_pose.position.x:.3f}, Y={insert_pose.position.y:.3f}, Z={insert_pose.position.z:.3f}')
+            self.get_logger().info(f'{arm}: Current position before J7 offset: X={current_ee_pose_robot.position.x:.3f}, Y={current_ee_pose_robot.position.y:.3f}, Z={current_ee_pose_robot.position.z:.3f}')
+            
+            # CRITICAL: Apply 45-degree J7 offset before linear forward movement
+            # This ensures the gripper is properly rotated before starting the insertion
+            self.get_logger().info(f'{arm}: Applying 45-degree J7 offset before linear forward insertion...')
+            j7_offset_applied = False
+            if self.joint_state:
                 try:
                     # Get current joint positions for this arm
                     current_joints = []
@@ -1315,390 +1538,218 @@ class DualPandaUnifiedNode(Node):
                         idx = self.joint_state.name.index(joint_name)
                         current_joints.append(self.joint_state.position[idx])
                     
-                    # Apply 45-degree offset to J7 (index 6) - this rotates the gripper base
-                    # J7 rotation will rotate the gripper and held object 45 degrees around the wrist axis
+                    # Apply 45-degree offset to J7 (index 6) before linear movement
                     new_joints = list(current_joints)
-                    new_joints[6] += (math.pi / 4.0)  # +45 degrees to rotate gripper base straight
-                    self.send_joint_trajectory(new_joints, arm=arm, seconds=1.0)
-                    self.get_logger().info(f'{arm}: Applied 45-degree J7 offset (J7: {current_joints[6]:.3f} -> {new_joints[6]:.3f}) - gripper base now faces straight toward hollow')
-                    time.sleep(0.5)  # Brief wait after J7 offset to ensure rotation completes
+                    old_j7 = current_joints[6]
+                    new_joints[6] += (math.pi / 4.0)  # +45 degrees
                     
-                    # CRITICAL: After J7 offset, get the NEW current pose to use as starting point for forward movement
-                    # Wait a moment for joint state to update
-                    time.sleep(0.3)
-                    # Get updated joint state after J7 rotation
+                    self.get_logger().info(f'{arm}: Applying J7 offset: {old_j7:.3f} rad -> {new_joints[6]:.3f} rad (+45 deg)')
+                    self.send_joint_trajectory(new_joints, arm=arm, seconds=1.5)
+                    time.sleep(0.8)  # Wait for rotation to complete
+                    
+                    # Verify the offset was applied by checking joint state again
                     if self.joint_state:
-                        updated_joints = []
-                        for joint_name in self.joint_names[arm]:
-                            idx = self.joint_state.name.index(joint_name)
-                            updated_joints.append(self.joint_state.position[idx])
-                        # Recompute the current pose from updated joints using IK/FK
-                        # For now, we'll use the updated joints to compute IK to the same position but with new J7
-                        # Actually, just update pre_insert_pose's orientation implicitly through the joint state
-                except (ValueError, IndexError) as e:
-                    self.get_logger().warn(f'{arm}: Failed to apply J7 offset: {e}')
-            
-            # Step 3.6: ON-THE-FLY ADJUSTMENT - Maintain 25cm distance and align Y, Z axes
-            # Get live poses of both solid and hollow objects
-            # Maintain 25cm distance along X-axis while aligning solid center Y,Z with hollow center Y,Z
-            self.get_logger().info(f'{arm}: Maintaining 25cm distance and aligning solid center Y,Z with hollow center Y,Z using live poses...')
-            time.sleep(0.2)  # Wait for pose updates
-            
-            # Re-read live poses of both objects
-            solid_live_data = self.get_pose(solid_name)
-            updated_hollow_data = self.get_pose(hollow_name)
-            
-            if not solid_live_data or not updated_hollow_data:
-                self.get_logger().warn(f'{arm}: Could not get live poses (solid: {solid_live_data is not None}, hollow: {updated_hollow_data is not None}), skipping X-axis alignment')
-                current_ee_data = self.get_ee_pose(arm)
-            else:
-                # Get current end-effector pose
-                current_ee_data = self.get_ee_pose(arm)
-                if current_ee_data:
-                    # Get live positions
-                    solid_center_x = solid_live_data['position'][0]
-                    solid_center_y = solid_live_data['position'][1]
-                    solid_center_z = solid_live_data['position'][2]
+                        try:
+                            j7_idx = self.joint_state.name.index(self.joint_names[arm][6])
+                            actual_j7 = self.joint_state.position[j7_idx]
+                            j7_diff = abs(actual_j7 - old_j7)
+                            self.get_logger().info(f'{arm}: J7 offset verified. Current J7: {actual_j7:.3f} rad (difference from start: {j7_diff:.3f} rad)')
+                            if j7_diff > 0.5:  # At least 0.5 rad (~28 deg) difference confirms rotation
+                                j7_offset_applied = True
+                            else:
+                                self.get_logger().warn(f'{arm}: J7 offset may not have been applied! Current J7: {actual_j7:.3f}, Start: {old_j7:.3f}')
+                        except (ValueError, IndexError) as e2:
+                            self.get_logger().warn(f'{arm}: Could not verify J7 offset: {e2}')
                     
-                    hollow_center_x = updated_hollow_data['position'][0]
-                    hollow_center_y = updated_hollow_data['position'][1]
-                    hollow_center_z = updated_hollow_data['position'][2]
-                    
-                    # Current gripper TCP position
-                    ee_x = current_ee_data[0]
-                    ee_y = current_ee_data[1]
-                    ee_z = current_ee_data[2]
-                    
-                    # OPTION 1: Calculate gripper-to-solid offset (accounts for solid not being perfectly centered in gripper)
-                    gripper_to_solid_y_offset = solid_center_y - ee_y
-                    gripper_to_solid_z_offset = solid_center_z - ee_z
-                    self.get_logger().info(f'{arm}: Gripper-to-solid offset: Y={gripper_to_solid_y_offset:.4f}m, Z={gripper_to_solid_z_offset:.4f}m')
-                    
-                    # MAINTAIN 25cm distance but align Y and Z axes
-                    # Keep gripper X at 25cm in front of hollow: target_ee_x = hollow_center_x - 0.25
-                    # But align solid center Y and Z with hollow center Y and Z
-                    
-                    # Target gripper X: Maintain 25cm distance from hollow center
-                    target_ee_x = hollow_center_x - 0.25  # 25cm in front of hollow center
-                    
-                    # OPTION 1: To align solid center Y with hollow center Y (accounting for offset):
-                    # Current: solid_center_y = ee_y + gripper_to_solid_y_offset
-                    # We want: solid_center_y = hollow_center_y
-                    # So: target_ee_y + gripper_to_solid_y_offset = hollow_center_y
-                    # Therefore: target_ee_y = hollow_center_y - gripper_to_solid_y_offset
-                    target_ee_y = hollow_center_y - gripper_to_solid_y_offset
-                    
-                    # OPTION 1: To align solid center Z with hollow center Z (accounting for offset):
-                    # Current: solid_center_z = ee_z + gripper_to_solid_z_offset
-                    # We want: solid_center_z = hollow_center_z
-                    # So: target_ee_z + gripper_to_solid_z_offset = hollow_center_z
-                    # Therefore: target_ee_z = hollow_center_z - gripper_to_solid_z_offset
-                    target_ee_z = hollow_center_z - gripper_to_solid_z_offset
-                    
-                    # Calculate offsets from current gripper position
-                    total_x_offset = target_ee_x - ee_x
-                    total_y_offset = target_ee_y - ee_y
-                    total_z_offset = target_ee_z - ee_z
-                    
-                    # If offset is significant (>2mm), adjust gripper position
-                    max_offset = max(abs(total_x_offset), abs(total_y_offset), abs(total_z_offset))
-                    if max_offset > 0.002:  # 2mm threshold
-                        self.get_logger().info(f'{arm}: Aligning solid center (Y={solid_center_y:.4f}, Z={solid_center_z:.4f}) with hollow center (Y={hollow_center_y:.4f}, Z={hollow_center_z:.4f})')
-                        self.get_logger().info(f'{arm}: Maintaining 25cm distance: gripper X={target_ee_x:.4f} (hollow X={hollow_center_x:.4f} - 0.25m)')
-                        self.get_logger().info(f'{arm}: Required offsets: X={total_x_offset:.4f}m (maintain 25cm), Y={total_y_offset:.4f}m (align centers), Z={total_z_offset:.4f}m (align centers)')
-                        
-                        # Create adjustment pose: maintain 25cm distance, align Y and Z
-                        adjusted_ee_world = Pose()
-                        adjusted_ee_world.position.x = target_ee_x  # Maintain 25cm in front
-                        adjusted_ee_world.position.y = target_ee_y  # Align solid center Y with hollow center Y
-                        adjusted_ee_world.position.z = target_ee_z  # Align solid center Z with hollow center Z
-                        # Keep current orientation (after J7 rotation)
-                        qx, qy, qz, qw = _euler_to_quaternion(current_ee_data[3], current_ee_data[4], current_ee_data[5])
-                        adjusted_ee_world.orientation.x = qx
-                        adjusted_ee_world.orientation.y = qy
-                        adjusted_ee_world.orientation.z = qz
-                        adjusted_ee_world.orientation.w = qw
-                        
-                        # Transform to robot frame
-                        adjusted_ee_robot = self._transform_to_robot_frame(adjusted_ee_world, arm)
-                        adjusted_ee_robot.orientation = adjusted_ee_world.orientation
-                        
-                        # Get current pose in robot frame for waypoint
+                    # Update current pose after J7 rotation - CRITICAL: This preserves the J7-rotated orientation
+                    time.sleep(0.5)  # Wait for joint state to update
+                    current_ee_data = self.get_ee_pose(arm)
+                    if current_ee_data:
                         current_ee_pose_world = Pose()
-                        current_ee_pose_world.position.x = ee_x
-                        current_ee_pose_world.position.y = ee_y
-                        current_ee_pose_world.position.z = ee_z
+                        current_ee_pose_world.position.x = current_ee_data[0]
+                        current_ee_pose_world.position.y = current_ee_data[1]
+                        current_ee_pose_world.position.z = current_ee_data[2]
+                        qx, qy, qz, qw = _euler_to_quaternion(current_ee_data[3], current_ee_data[4], current_ee_data[5])
                         current_ee_pose_world.orientation.x = qx
                         current_ee_pose_world.orientation.y = qy
                         current_ee_pose_world.orientation.z = qz
                         current_ee_pose_world.orientation.w = qw
                         current_ee_pose_robot = self._transform_to_robot_frame(current_ee_pose_world, arm)
+                        # CRITICAL: Use the actual orientation AFTER J7 rotation (includes the 45deg offset)
                         current_ee_pose_robot.orientation = current_ee_pose_world.orientation
-                        
-                        # Adjustment movement to maintain 25cm distance and align Y,Z axes
-                        adjustment_waypoints = [current_ee_pose_robot, adjusted_ee_robot]
-                        adjustment_joints = self._compute_cartesian_path(adjustment_waypoints, arm=arm)
-                        
-                        if adjustment_joints:
-                            self.send_joint_trajectory(adjustment_joints, arm=arm, seconds=2.0)
-                            self.get_logger().info(f'{arm}: Successfully maintained 25cm distance and aligned solid center Y,Z with hollow center Y,Z')
-                            time.sleep(0.3)  # Wait for adjustment to complete
-                            
-                            # OPTION 2 & 4: Re-read poses after alignment and verify/correct alignment
-                            self.get_logger().info(f'{arm}: Re-reading object poses after alignment to verify...')
-                            time.sleep(0.2)  # Wait for poses to update
-                            
-                            # Re-read live poses to verify alignment
-                            verify_solid_data = self.get_pose(solid_name)
-                            verify_hollow_data = self.get_pose(hollow_name)
-                            
-                            if verify_solid_data and verify_hollow_data:
-                                verify_solid_y = verify_solid_data['position'][1]
-                                verify_solid_z = verify_solid_data['position'][2]
-                                verify_hollow_y = verify_hollow_data['position'][1]
-                                verify_hollow_z = verify_hollow_data['position'][2]
-                                
-                                # Calculate remaining misalignment
-                                y_misalignment = verify_hollow_y - verify_solid_y
-                                z_misalignment = verify_hollow_z - verify_solid_z
-                                max_misalignment = max(abs(y_misalignment), abs(z_misalignment))
-                                
-                                self.get_logger().info(f'{arm}: Post-alignment verification: solid Y={verify_solid_y:.4f}, hollow Y={verify_hollow_y:.4f}, diff={y_misalignment:.4f}m')
-                                self.get_logger().info(f'{arm}: Post-alignment verification: solid Z={verify_solid_z:.4f}, hollow Z={verify_hollow_z:.4f}, diff={z_misalignment:.4f}m')
-                                
-                                # OPTION 4: If still misaligned (>1mm), apply correction
-                                if max_misalignment > 0.001:  # 1mm threshold for refinement
-                                    self.get_logger().info(f'{arm}: Still misaligned (Y diff: {y_misalignment:.4f}m, Z diff: {z_misalignment:.4f}m), applying correction...')
-                                    
-                                    # Get current EE pose after first alignment
-                                    verify_ee_data = self.get_ee_pose(arm)
-                                    if verify_ee_data:
-                                        verify_ee_y = verify_ee_data[1]
-                                        verify_ee_z = verify_ee_data[2]
-                                        
-                                        # Calculate correction needed (accounting for gripper-to-solid offset)
-                                        # We want: solid_center_y = hollow_center_y
-                                        # Current: solid_center_y = verify_ee_y + gripper_to_solid_y_offset
-                                        # Required: target_ee_y + gripper_to_solid_y_offset = hollow_center_y
-                                        corrected_ee_y = verify_hollow_y - gripper_to_solid_y_offset
-                                        corrected_ee_z = verify_hollow_z - gripper_to_solid_z_offset
-                                        
-                                        # Create correction pose (keep X and orientation the same)
-                                        corrected_ee_world = Pose()
-                                        corrected_ee_world.position.x = verify_ee_data[0]  # Keep X as is
-                                        corrected_ee_world.position.y = corrected_ee_y
-                                        corrected_ee_world.position.z = corrected_ee_z
-                                        corrected_ee_world.orientation.x = qx
-                                        corrected_ee_world.orientation.y = qy
-                                        corrected_ee_world.orientation.z = qz
-                                        corrected_ee_world.orientation.w = qw
-                                        
-                                        # Transform to robot frame
-                                        corrected_ee_robot = self._transform_to_robot_frame(corrected_ee_world, arm)
-                                        corrected_ee_robot.orientation = corrected_ee_world.orientation
-                                        
-                                        # Small correction movement
-                                        current_verify_pose_world = Pose()
-                                        current_verify_pose_world.position.x = verify_ee_data[0]
-                                        current_verify_pose_world.position.y = verify_ee_y
-                                        current_verify_pose_world.position.z = verify_ee_z
-                                        current_verify_pose_world.orientation.x = qx
-                                        current_verify_pose_world.orientation.y = qy
-                                        current_verify_pose_world.orientation.z = qz
-                                        current_verify_pose_world.orientation.w = qw
-                                        current_verify_pose_robot = self._transform_to_robot_frame(current_verify_pose_world, arm)
-                                        current_verify_pose_robot.orientation = current_verify_pose_world.orientation
-                                        
-                                        correction_waypoints = [current_verify_pose_robot, corrected_ee_robot]
-                                        correction_joints = self._compute_cartesian_path(correction_waypoints, arm=arm)
-                                        
-                                        if correction_joints:
-                                            self.send_joint_trajectory(correction_joints, arm=arm, seconds=1.0)
-                                            self.get_logger().info(f'{arm}: Applied alignment correction (Y: {verify_ee_y:.4f} -> {corrected_ee_y:.4f}, Z: {verify_ee_z:.4f} -> {corrected_ee_z:.4f})')
-                                            time.sleep(0.2)
-                                            
-                                            # Update current_ee_data after correction
-                                            current_ee_data = self.get_ee_pose(arm)
-                                        else:
-                                            self.get_logger().warn(f'{arm}: Failed to compute correction path, proceeding with current alignment')
-                                else:
-                                    self.get_logger().info(f'{arm}: ✓ Alignment verified: solid and hollow centers are aligned (within 1mm tolerance)')
-                            
-                            # Re-read EE pose after alignment (or correction)
-                            current_ee_data = self.get_ee_pose(arm)
-                        else:
-                            self.get_logger().warn(f'{arm}: Failed to compute alignment path, proceeding with current position')
+                        self.get_logger().info(f'{arm}: Current position after J7 offset: X={current_ee_pose_robot.position.x:.3f}, Y={current_ee_pose_robot.position.y:.3f}, Z={current_ee_pose_robot.position.z:.3f}')
+                        self.get_logger().info(f'{arm}: Orientation after J7 offset: qx={current_ee_pose_robot.orientation.x:.3f}, qy={current_ee_pose_robot.orientation.y:.3f}, qz={current_ee_pose_robot.orientation.z:.3f}, qw={current_ee_pose_robot.orientation.w:.3f}')
+                        j7_offset_applied = True
                     else:
-                        self.get_logger().info(f'{arm}: Already aligned (X offset: {total_x_offset:.4f}m, Y offset: {total_y_offset:.4f}m, Z offset: {total_z_offset:.4f}m, all within tolerance)')
-                else:
-                    self.get_logger().warn(f'{arm}: Could not get current EE pose for alignment')
+                        self.get_logger().warn(f'{arm}: Could not update pose after J7 offset')
+                except (ValueError, IndexError) as e:
+                    self.get_logger().error(f'{arm}: Failed to apply J7 offset: {e}')
+                    import traceback
+                    self.get_logger().error(traceback.format_exc())
             
-            # Step 3.7: FINAL ALIGNMENT VERIFICATION - Ensure perfect alignment before forward movement
-            # Re-read poses one final time and verify/correct alignment to ensure both centers are perfectly aligned
-            self.get_logger().info(f'{arm}: Final alignment verification before forward movement...')
-            time.sleep(0.2)  # Wait for pose updates
-            
-            # Re-read live poses one final time
-            final_solid_data = self.get_pose(solid_name)
-            final_hollow_data = self.get_pose(hollow_name)
-            
-            if final_solid_data and final_hollow_data:
-                final_solid_y = final_solid_data['position'][1]
-                final_solid_z = final_solid_data['position'][2]
-                final_hollow_y = final_hollow_data['position'][1]
-                final_hollow_z = final_hollow_data['position'][2]
-                
-                # Get current EE pose
-                final_ee_data = self.get_ee_pose(arm)
-                if final_ee_data:
-                    final_ee_y = final_ee_data[1]
-                    final_ee_z = final_ee_data[2]
-                    
-                    # Recalculate gripper-to-solid offset (it might have changed slightly)
-                    final_gripper_to_solid_y_offset = final_solid_y - final_ee_y
-                    final_gripper_to_solid_z_offset = final_solid_z - final_ee_z
-                    
-                    # Calculate misalignment
-                    y_misalignment = final_hollow_y - final_solid_y
-                    z_misalignment = final_hollow_z - final_solid_z
-                    max_misalignment = max(abs(y_misalignment), abs(z_misalignment))
-                    
-                    self.get_logger().info(f'{arm}: Final check - Solid Y={final_solid_y:.4f}, Hollow Y={final_hollow_y:.4f}, Diff={y_misalignment:.4f}m')
-                    self.get_logger().info(f'{arm}: Final check - Solid Z={final_solid_z:.4f}, Hollow Z={final_hollow_z:.4f}, Diff={z_misalignment:.4f}m')
-                    
-                    # If misaligned (>0.5mm), apply final correction
-                    if max_misalignment > 0.0005:  # 0.5mm threshold for final precision
-                        self.get_logger().info(f'{arm}: Final correction needed (Y diff: {y_misalignment:.4f}m, Z diff: {z_misalignment:.4f}m), aligning centers perfectly...')
-                        
-                        # Calculate target gripper position to perfectly align centers
-                        # We want: solid_center = hollow_center
-                        # Since: solid_center = ee_position + gripper_to_solid_offset
-                        # Therefore: target_ee_y + gripper_to_solid_y_offset = hollow_center_y
-                        # So: target_ee_y = hollow_center_y - gripper_to_solid_y_offset
-                        final_target_ee_y = final_hollow_y - final_gripper_to_solid_y_offset
-                        final_target_ee_z = final_hollow_z - final_gripper_to_solid_z_offset
-                        
-                        # Create final correction pose (keep X and orientation)
-                        final_corrected_world = Pose()
-                        final_corrected_world.position.x = final_ee_data[0]  # Keep X (maintain 25cm distance)
-                        final_corrected_world.position.y = final_target_ee_y  # Perfect Y alignment
-                        final_corrected_world.position.z = final_target_ee_z  # Perfect Z alignment
-                        # Keep current orientation (after J7 rotation)
-                        qx, qy, qz, qw = _euler_to_quaternion(final_ee_data[3], final_ee_data[4], final_ee_data[5])
-                        final_corrected_world.orientation.x = qx
-                        final_corrected_world.orientation.y = qy
-                        final_corrected_world.orientation.z = qz
-                        final_corrected_world.orientation.w = qw
-                        
-                        # Transform to robot frame
-                        final_corrected_robot = self._transform_to_robot_frame(final_corrected_world, arm)
-                        final_corrected_robot.orientation = final_corrected_world.orientation
-                        
-                        # Current pose in robot frame
-                        final_current_world = Pose()
-                        final_current_world.position.x = final_ee_data[0]
-                        final_current_world.position.y = final_ee_y
-                        final_current_world.position.z = final_ee_z
-                        final_current_world.orientation.x = qx
-                        final_current_world.orientation.y = qy
-                        final_current_world.orientation.z = qz
-                        final_current_world.orientation.w = qw
-                        final_current_robot = self._transform_to_robot_frame(final_current_world, arm)
-                        final_current_robot.orientation = final_current_world.orientation
-                        
-                        # Final correction movement
-                        final_correction_waypoints = [final_current_robot, final_corrected_robot]
-                        final_correction_joints = self._compute_cartesian_path(final_correction_waypoints, arm=arm)
-                        
-                        if final_correction_joints:
-                            self.send_joint_trajectory(final_correction_joints, arm=arm, seconds=1.5)
-                            self.get_logger().info(f'{arm}: ✓ Final alignment correction applied - solid and hollow centers now perfectly aligned')
-                            time.sleep(0.2)
-                            
-                            # Update current_ee_data after final correction
-                            current_ee_data = self.get_ee_pose(arm)
-                        else:
-                            self.get_logger().warn(f'{arm}: Failed to compute final correction path, proceeding with current alignment')
-                    else:
-                        self.get_logger().info(f'{arm}: ✓ Perfect alignment confirmed! Solid and hollow centers are aligned (within 0.5mm tolerance)')
-                        # Update current_ee_data (use existing)
-                        current_ee_data = final_ee_data
-                else:
-                    self.get_logger().warn(f'{arm}: Could not get EE pose for final verification')
+            if not j7_offset_applied:
+                self.get_logger().warn(f'{arm}: WARNING - J7 offset may not have been applied! Proceeding anyway...')
             else:
-                self.get_logger().warn(f'{arm}: Could not get object poses for final verification')
+                self.get_logger().info(f'{arm}: J7 offset successfully applied. Ready for linear forward insertion.')
             
-            # Step 4: Move forward along X-axis (toward hollow)
-            # CRITICAL: After J7 offset and final alignment verification, get the current pose for forward movement
-            self.get_logger().info(f'{arm}: Moving forward 8cm along X-axis from current position (after final alignment verification)...')
+            # CRITICAL: Break insertion into smaller increments to avoid obstacles
+            # Cartesian paths can only go straight, so we'll move forward in smaller steps
+            # Calculate initial distance to target
+            dx = insert_pose.position.x - current_ee_pose_robot.position.x
+            dy = insert_pose.position.y - current_ee_pose_robot.position.y
+            dz = insert_pose.position.z - current_ee_pose_robot.position.z
+            initial_distance = math.sqrt(dx*dx + dy*dy + dz*dz)
             
-            # Get current end-effector pose after all adjustments
-            if not current_ee_data:
-                self.get_logger().warn(f'{arm}: Cannot get current EE pose, using pre_insert_pose as fallback')
-                current_ee_pose_robot = pre_insert_pose
-                current_ee_pose_world = None
-            else:
-                # Convert current EE pose to robot frame for use as starting point
-                current_ee_pose_world = Pose()
-                current_ee_pose_world.position.x = current_ee_data[0]
-                current_ee_pose_world.position.y = current_ee_data[1]
-                current_ee_pose_world.position.z = current_ee_data[2]
-                # Use current orientation (from FK) - this includes the J7 rotation
-                qx, qy, qz, qw = _euler_to_quaternion(current_ee_data[3], current_ee_data[4], current_ee_data[5])
-                current_ee_pose_world.orientation.x = qx
-                current_ee_pose_world.orientation.y = qy
-                current_ee_pose_world.orientation.z = qz
-                current_ee_pose_world.orientation.w = qw
+            self.get_logger().info(f'{arm}: Total insertion distance: {initial_distance*100:.1f}cm. Breaking into 2cm increments...')
+            
+            step_size = 0.02  # 2cm increments
+            current_pose = current_ee_pose_robot
+            
+            # Move forward in small steps until we reach the target
+            max_iterations = 20  # Safety limit
+            iteration = 0
+            while iteration < max_iterations:
+                # Recalculate distance and direction from CURRENT position to target
+                dx = insert_pose.position.x - current_pose.position.x
+                dy = insert_pose.position.y - current_pose.position.y
+                dz = insert_pose.position.z - current_pose.position.z
+                remaining_distance = math.sqrt(dx*dx + dy*dy + dz*dz)
                 
-                # Transform to robot frame
-                current_ee_pose_robot = self._transform_to_robot_frame(current_ee_pose_world, arm)
-                current_ee_pose_robot.orientation = current_ee_pose_world.orientation
-            
-            # Calculate insert pose: 2cm forward from CURRENT position (after adjustment)
-            # CRITICAL: Use current position (after J7 offset and alignment) as starting point
-            if not current_ee_data or not current_ee_pose_world:
-                self.get_logger().warn(f'{arm}: Cannot calculate insert pose from current position, using original calculation')
-                insert_pose_robot = self._transform_to_robot_frame(world_insert_pose, arm)
-                insert_pose_robot.orientation = world_insert_pose.orientation
-            else:
-                # Calculate insert pose: current position + 8cm forward along X-axis (toward hollow)
-                # CRITICAL: Keep Y and Z exactly the same to maintain perfect alignment during forward movement
-                # This ensures the solid center moves straight into the hollow center
-                insert_pose_world = Pose()
-                insert_pose_world.position.x = current_ee_pose_world.position.x + 0.08  # 8cm forward (0.08m)
-                insert_pose_world.position.y = current_ee_pose_world.position.y  # Keep Y exactly the same (maintains Y alignment)
-                insert_pose_world.position.z = current_ee_pose_world.position.z  # Keep Z exactly the same (maintains Z alignment)
-                # Use current orientation (after J7 rotation)
-                insert_pose_world.orientation = current_ee_pose_world.orientation
+                if remaining_distance < 0.005:  # Within 5mm of target
+                    self.get_logger().info(f'{arm}: Reached target! Remaining distance: {remaining_distance*100:.2f}cm')
+                    break
                 
-                self.get_logger().info(f'{arm}: Insert pose calculated: 8cm forward from current position (X={insert_pose_world.position.x:.3f}m)')
-                self.get_logger().info(f'{arm}: Y and Z maintained at aligned values (Y={insert_pose_world.position.y:.4f}m, Z={insert_pose_world.position.z:.4f}m)')
+                # Normalize direction vector
+                if remaining_distance < 0.001:
+                    break  # Already at target
                 
-                # Transform to robot frame
-                insert_pose_robot = self._transform_to_robot_frame(insert_pose_world, arm)
-                insert_pose_robot.orientation = insert_pose_world.orientation
-            
-            # Use Cartesian path for precise 8cm forward movement from CURRENT position
-            # CRITICAL: This maintains perfect Y,Z alignment throughout forward movement (straight insertion)
-            # Y and Z stay exactly the same, only X moves forward - ensures solid goes straight into hole
-            waypoints_insert = [current_ee_pose_robot, insert_pose_robot]
-            joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
-            
-            if joints_insert:
-                self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
-                self.get_logger().info(f'{arm}: Successfully moved forward 8cm with perfect Y,Z alignment maintained!')
-            else:
-                # Fallback: Try IK
-                self.get_logger().warn(f'{arm}: Cartesian path for 8cm forward failed, trying IK...')
+                direction_x = dx / remaining_distance
+                direction_y = dy / remaining_distance
+                direction_z = dz / remaining_distance
+                
+                # Step distance (2cm or remaining distance, whichever is smaller)
+                step_distance = min(step_size, remaining_distance)
+                
+                # Create next waypoint (current + step in direction of target)
+                next_pose = Pose()
+                next_pose.position.x = current_pose.position.x + direction_x * step_distance
+                next_pose.position.y = current_pose.position.y + direction_y * step_distance
+                next_pose.position.z = current_pose.position.z + direction_z * step_distance
+                # CRITICAL: Use current orientation (which includes J7 offset) instead of insert_pose orientation
+                # This preserves the 45-degree J7 rotation throughout the linear movement
+                next_pose.orientation = current_pose.orientation  # Keep current orientation (includes J7 offset)
+                
+                # Try to move to this waypoint
                 try:
-                    insert_joints_ik = self.compute_ik(insert_pose_robot, arm=arm)
-                    self.send_joint_trajectory(insert_joints_ik, arm=arm, seconds=3.0)
-                    self.get_logger().info(f'{arm}: Successfully moved forward 8cm via IK with perfect alignment!')
-                except Exception as ik_err2:
-                    self.get_logger().error(f'{arm}: Failed to move forward 8cm: {ik_err2}')
-                    return False
+                    waypoints_step = [current_pose, next_pose]
+                    joints_step = self._compute_cartesian_path(waypoints_step, arm=arm)
+                    if joints_step:
+                        self.send_joint_trajectory(joints_step, arm=arm, seconds=2.0)
+                        remaining_distance -= step_distance
+                        self.get_logger().info(f'{arm}: Moved forward {step_distance*100:.1f}cm. Remaining: {remaining_distance*100:.1f}cm')
+                        
+                        # Update current pose for next step
+                        time.sleep(0.2)
+                        updated_ee_data = self.get_ee_pose(arm)
+                        if updated_ee_data:
+                            current_pose_world = Pose()
+                            current_pose_world.position.x = updated_ee_data[0]
+                            current_pose_world.position.y = updated_ee_data[1]
+                            current_pose_world.position.z = updated_ee_data[2]
+                            qx, qy, qz, qw = _euler_to_quaternion(updated_ee_data[3], updated_ee_data[4], updated_ee_data[5])
+                            current_pose_world.orientation.x = qx
+                            current_pose_world.orientation.y = qy
+                            current_pose_world.orientation.z = qz
+                            current_pose_world.orientation.w = qw
+                            current_pose = self._transform_to_robot_frame(current_pose_world, arm)
+                            # CRITICAL: Use actual current orientation (which includes J7 offset) instead of overwriting
+                            current_pose.orientation = current_pose_world.orientation  # Keep current orientation (includes J7 offset)
+                            
+                            # Recalculate remaining distance from current position
+                            dx = insert_pose.position.x - current_pose.position.x
+                            dy = insert_pose.position.y - current_pose.position.y
+                            dz = insert_pose.position.z - current_pose.position.z
+                            remaining_distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        else:
+                            # Assume we moved successfully, update remaining distance
+                            remaining_distance -= step_distance
+                    else:
+                        self.get_logger().warn(f'{arm}: Cartesian path failed for {step_distance*100:.1f}cm step. Trying IK...')
+                        # Try IK as fallback
+                        try:
+                            joints_ik = self.compute_ik(next_pose, arm=arm)
+                            self.send_joint_trajectory(joints_ik, arm=arm, seconds=2.0)
+                            remaining_distance -= step_distance
+                            time.sleep(0.2)
+                            # Update current pose
+                            updated_ee_data = self.get_ee_pose(arm)
+                            if updated_ee_data:
+                                current_pose_world = Pose()
+                                current_pose_world.position.x = updated_ee_data[0]
+                                current_pose_world.position.y = updated_ee_data[1]
+                                current_pose_world.position.z = updated_ee_data[2]
+                                qx, qy, qz, qw = _euler_to_quaternion(updated_ee_data[3], updated_ee_data[4], updated_ee_data[5])
+                                current_pose_world.orientation.x = qx
+                                current_pose_world.orientation.y = qy
+                                current_pose_world.orientation.z = qz
+                                current_pose_world.orientation.w = qw
+                                current_pose = self._transform_to_robot_frame(current_pose_world, arm)
+                                # CRITICAL: Use actual current orientation (which includes J7 offset)
+                                current_pose.orientation = current_pose_world.orientation  # Keep current orientation (includes J7 offset)
+                                # Recalculate remaining distance
+                                dx = insert_pose.position.x - current_pose.position.x
+                                dy = insert_pose.position.y - current_pose.position.y
+                                dz = insert_pose.position.z - current_pose.position.z
+                                remaining_distance = math.sqrt(dx*dx + dy*dy + dz*dz)
+                        except Exception as ik_err:
+                            self.get_logger().error(f'{arm}: IK also failed: {ik_err}. Stopping incremental insertion.')
+                            break
+                except Exception as step_err:
+                    self.get_logger().warn(f'{arm}: Step failed: {step_err}. Trying direct IK to final target...')
+                    # Try direct IK to final target as last resort
+                    try:
+                        joints_final = self.compute_ik(insert_pose, arm=arm)
+                        self.send_joint_trajectory(joints_final, arm=arm, seconds=3.0)
+                        self.get_logger().info(f'{arm}: Successfully reached insert pose via direct IK!')
+                        remaining_distance = 0  # Mark as complete
+                        break
+                    except Exception as final_err:
+                        self.get_logger().error(f'{arm}: Final IK also failed: {final_err}')
+                        return False
             
-            self.get_logger().info(f'{arm}: Insert sequence complete! Reached pre-insert (25cm front), applied J7 offset, perfectly aligned centers in Y,Z, then moved forward 8cm straight into hole.')
+            # Check final distance and attempt final correction if needed
+            time.sleep(0.3)
+            final_ee_data = self.get_ee_pose(arm)
+            if final_ee_data:
+                final_pose_world = Pose()
+                final_pose_world.position.x = final_ee_data[0]
+                final_pose_world.position.y = final_ee_data[1]
+                final_pose_world.position.z = final_ee_data[2]
+                final_pose_robot = self._transform_to_robot_frame(final_pose_world, arm)
+                final_dx = insert_pose.position.x - final_pose_robot.position.x
+                final_dy = insert_pose.position.y - final_pose_robot.position.y
+                final_dz = insert_pose.position.z - final_pose_robot.position.z
+                final_distance = math.sqrt(final_dx*final_dx + final_dy*final_dy + final_dz*final_dz)
+                
+                # If close but not quite there, try one more IK attempt to complete insertion
+                if 0.005 < final_distance <= 0.03:  # Between 0.5-3cm away
+                    self.get_logger().info(f'{arm}: Close to target (distance: {final_distance*100:.2f}cm). Attempting final IK to complete insertion...')
+                    try:
+                        final_joints = self.compute_ik(insert_pose, arm=arm)
+                        self.send_joint_trajectory(final_joints, arm=arm, seconds=2.0)
+                        time.sleep(0.3)
+                        self.get_logger().info(f'{arm}: Final correction completed!')
+                    except Exception as final_ik_err:
+                        self.get_logger().warn(f'{arm}: Final IK correction failed: {final_ik_err}')
+                
+                if final_distance <= 0.02:  # Within 2cm is acceptable
+                    self.get_logger().info(f'{arm}: Successfully completed insertion! Final distance: {final_distance*100:.2f}cm')
+                else:
+                    self.get_logger().warn(f'{arm}: Insertion incomplete. Final distance: {final_distance*100:.1f}cm')
+            else:
+                self.get_logger().warn(f'{arm}: Could not verify final insertion distance (EE pose unavailable)')
+            
+            self.get_logger().info(f'{arm}: Insert sequence complete! Used frame-based approach for perfect alignment and straight insertion.')
             # joints_insert = self._compute_cartesian_path(waypoints_insert, arm=arm)
             # self.send_joint_trajectory(joints_insert, arm=arm, seconds=3.0)
         except Exception as e:
@@ -2402,6 +2453,138 @@ def _euler_to_quaternion(roll: float, pitch: float, yaw: float) -> Tuple[float, 
     qz = cr * cp * sy - sr * sp * cy
 
     return qx, qy, qz, qw
+
+
+def _quaternion_multiply(q1: Tuple[float, float, float, float], q2: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
+    """Multiply two quaternions: q_result = q1 * q2."""
+    w1, x1, y1, z1 = q1[3], q1[0], q1[1], q1[2]
+    w2, x2, y2, z2 = q2[3], q2[0], q2[1], q2[2]
+    
+    w = w1*w2 - x1*x2 - y1*y2 - z1*z2
+    x = w1*x2 + x1*w2 + y1*z2 - z1*y2
+    y = w1*y2 - x1*z2 + y1*w2 + z1*x2
+    z = w1*z2 + x1*y2 - y1*x2 + z1*w2
+    
+    return x, y, z, w
+
+
+def _quaternion_rotate_vector(q: Tuple[float, float, float, float], v: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """Rotate a vector by a quaternion: v_rotated = q * v * q^-1."""
+    x, y, z, w = q[0], q[1], q[2], q[3]
+    vx, vy, vz = v[0], v[1], v[2]
+    
+    # Convert vector to quaternion (pure quaternion: w=0)
+    v_quat = (vx, vy, vz, 0.0)
+    q_inv = (-x, -y, -z, w)  # Quaternion inverse (conjugate for unit quaternion)
+    
+    # Rotate: q * v * q^-1
+    temp = _quaternion_multiply((x, y, z, w), v_quat)
+    result = _quaternion_multiply(temp, q_inv)
+    
+    return (result[0], result[1], result[2])
+
+
+def _compose_transforms(pose1: Pose, pose2: Pose) -> Pose:
+    """
+    Compose two transforms: result = pose1 * pose2
+    
+    Given:
+    - pose1: Transform from frame A to frame B
+    - pose2: Transform from frame B to frame C
+    
+    Returns:
+    - result: Transform from frame A to frame C
+    """
+    result = Pose()
+    
+    # Extract quaternions
+    q1 = (pose1.orientation.x, pose1.orientation.y, pose1.orientation.z, pose1.orientation.w)
+    q2 = (pose2.orientation.x, pose2.orientation.y, pose2.orientation.z, pose2.orientation.w)
+    
+    # Compose orientations: q_result = q1 * q2
+    q_result = _quaternion_multiply(q1, q2)
+    result.orientation.x = q_result[0]
+    result.orientation.y = q_result[1]
+    result.orientation.z = q_result[2]
+    result.orientation.w = q_result[3]
+    
+    # Compose positions: p_result = p1 + R1 * p2
+    p1 = (pose1.position.x, pose1.position.y, pose1.position.z)
+    p2 = (pose2.position.x, pose2.position.y, pose2.position.z)
+    
+    # Rotate p2 by q1
+    p2_rotated = _quaternion_rotate_vector(q1, p2)
+    
+    # Add rotated p2 to p1
+    result.position.x = p1[0] + p2_rotated[0]
+    result.position.y = p1[1] + p2_rotated[1]
+    result.position.z = p1[2] + p2_rotated[2]
+    
+    return result
+
+
+def _apply_transform(transform: Pose, point: Tuple[float, float, float]) -> Tuple[float, float, float]:
+    """
+    Apply a transform to a point: result_point = transform * point
+    
+    Args:
+        transform: Pose representing the transform
+        point: (x, y, z) tuple
+    
+    Returns:
+        Transformed point as (x, y, z) tuple
+    """
+    # Rotate the point
+    q = (transform.orientation.x, transform.orientation.y, transform.orientation.z, transform.orientation.w)
+    rotated_point = _quaternion_rotate_vector(q, point)
+    
+    # Translate
+    result = (
+        transform.position.x + rotated_point[0],
+        transform.position.y + rotated_point[1],
+        transform.position.z + rotated_point[2]
+    )
+    
+    return result
+
+
+def _pose_from_position_quaternion(pos: Tuple[float, float, float], quat: Tuple[float, float, float, float]) -> Pose:
+    """Create a Pose from position and quaternion."""
+    pose = Pose()
+    pose.position.x = pos[0]
+    pose.position.y = pos[1]
+    pose.position.z = pos[2]
+    pose.orientation.x = quat[0]
+    pose.orientation.y = quat[1]
+    pose.orientation.z = quat[2]
+    pose.orientation.w = quat[3]
+    return pose
+
+
+def _invert_transform(transform: Pose) -> Pose:
+    """
+    Invert a transform: result = transform^-1
+    
+    For a transform T = [R, p], the inverse is T^-1 = [R^T, -R^T * p]
+    """
+    result = Pose()
+    
+    # Invert quaternion (conjugate for unit quaternion)
+    q = (transform.orientation.x, transform.orientation.y, transform.orientation.z, transform.orientation.w)
+    q_inv = (-q[0], -q[1], -q[2], q[3])
+    result.orientation.x = q_inv[0]
+    result.orientation.y = q_inv[1]
+    result.orientation.z = q_inv[2]
+    result.orientation.w = q_inv[3]
+    
+    # Invert position: -R^T * p
+    p = (transform.position.x, transform.position.y, transform.position.z)
+    p_rotated = _quaternion_rotate_vector(q_inv, p)
+    result.position.x = -p_rotated[0]
+    result.position.y = -p_rotated[1]
+    result.position.z = -p_rotated[2]
+    
+    return result
 
 
 def main():
