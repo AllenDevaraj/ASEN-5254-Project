@@ -2080,13 +2080,13 @@ class DualPandaUnifiedNode(Node):
                     self.task_manager.apply_action(action)
                     
                 elif action.name == "put_down":
-                    # put_down(arm, obj, location)
+                    # put_down(arm, obj, location) - DROP from height instead of careful placement
                     obj = action.params[1]
                     location = action.params[2]
                     
-                    # Find a safe location on the table to place the object
+                    # Find a safe location to drop the object
                     if location == "table":
-                        # Place on table - use a safe location within reach of the arm
+                        # Drop location - use a safe location within reach of the arm
                         # Panda 1 is at x=0, Panda 2 is at x=1.4
                         # Place closer to each arm's base to ensure reachability
                         if arm == "panda1":
@@ -2095,56 +2095,75 @@ class DualPandaUnifiedNode(Node):
                         else:  # panda2
                             safe_x = 1.0  # Close to Panda 2 (at x=1.4), within reach
                             safe_y = -0.3  # On left side
-                        safe_z = self.table_height
+                        drop_height = 0.7  # Drop from 50cm above table
                         
-                        if not self.place_object(arm, [safe_x, safe_y, safe_z]):
-                            self.get_logger().error(f'{arm}: Failed to put down {obj}')
-                            self._task_execution_in_progress.discard(execution_key)
-                            return False
-                        
-                        # Update object position in self.objects (object is now at new location)
-                        with self.objects_lock:
-                            if obj in self.objects:
-                                self.objects[obj]['position'] = [safe_x, safe_y, safe_z]
-                        
-                        # Update TaskManager state
-                        self.task_manager.apply_action(action)
-                        
-                        # Re-infer state from poses (object is now on table)
-                        self.task_manager.update_state_from_poses()
-                        
-                        # CRITICAL: Move to safe height after put_down to avoid collisions when picking next object
-                        # This ensures the arm is clear before starting next TAMP action
                         import time
-                        self.get_logger().info(f'{arm}: Moving to safe height after put_down to avoid collisions...')
-                        world_safe_height = Pose()
-                        world_safe_height.position.x = safe_x
-                        world_safe_height.position.y = safe_y
-                        world_safe_height.position.z = 0.5  # 50cm above table - safe height
+                        self.get_logger().info(f'{arm}: Moving to drop position above ({safe_x:.2f}, {safe_y:.2f}) at z={drop_height}...')
+                        
+                        # Move to drop position (z=0.5 above safe location)
+                        world_drop_pose = Pose()
+                        world_drop_pose.position.x = safe_x
+                        world_drop_pose.position.y = safe_y
+                        world_drop_pose.position.z = drop_height
                         qx, qy, qz, qw = _euler_to_quaternion(math.pi, 0.0, 0.0)  # Gripper pointing down
-                        world_safe_height.orientation.x = qx
-                        world_safe_height.orientation.y = qy
-                        world_safe_height.orientation.z = qz
-                        world_safe_height.orientation.w = qw
+                        world_drop_pose.orientation.x = qx
+                        world_drop_pose.orientation.y = qy
+                        world_drop_pose.orientation.z = qz
+                        world_drop_pose.orientation.w = qw
                         
                         try:
-                            safe_height_pose = self._transform_to_robot_frame(world_safe_height, arm)
-                            safe_height_pose.orientation = world_safe_height.orientation
+                            # Transform to robot base frame
+                            drop_pose = self._transform_to_robot_frame(world_drop_pose, arm)
+                            drop_pose.orientation = world_drop_pose.orientation
+                            
+                            # Plan and move to drop position using RRTConnect for collision-free path
                             planning_scene = self._setup_planning_scene(use_live_poses=True)
-                            safe_trajectory = self._plan_with_ompl(safe_height_pose, arm=arm, planner_id='RRTConnect', planning_scene=planning_scene, relax_orientation=True)
-                            if self.execute_trajectory_moveit(safe_trajectory, arm=arm):
-                                self.get_logger().info(f'{arm}: ✓ Moved to safe height after put_down')
-                            else:
-                                self.get_logger().warn(f'{arm}: Failed to move to safe height via MoveIt, trying direct...')
-                                # Try direct movement as fallback
-                                safe_joints = self.compute_ik(safe_height_pose, arm=arm)
-                                if safe_joints:
-                                    self.send_joint_trajectory(safe_joints, arm=arm, seconds=3.0)
+                            drop_trajectory = self._plan_with_ompl(drop_pose, arm=arm, planner_id='RRTConnect', planning_scene=planning_scene, relax_orientation=True)
+                            if not self.execute_trajectory_moveit(drop_trajectory, arm=arm):
+                                # Fallback to direct IK
+                                self.get_logger().warn(f'{arm}: OMPL planning failed, trying direct IK...')
+                                drop_joints = self.compute_ik(drop_pose, arm=arm)
+                                if drop_joints:
+                                    self.send_joint_trajectory(drop_joints, arm=arm, seconds=3.0)
                                     time.sleep(3.5)
-                                    self.get_logger().info(f'{arm}: ✓ Moved to safe height via direct execution')
+                                else:
+                                    self.get_logger().error(f'{arm}: Failed to compute IK for drop position')
+                                    self._task_execution_in_progress.discard(execution_key)
+                                    return False
+                            
+                            # Wait a moment to ensure we're at the drop position
+                            time.sleep(0.5)
+                            
+                            # Drop the object by opening gripper
+                            self.get_logger().info(f'{arm}: Dropping {obj} by opening gripper...')
+                            self.send_gripper_goal(0.04, arm=arm)  # Open gripper
+                            time.sleep(1.0)  # Wait for object to fall
+                            
+                            # Clear held object status
+                            self.held_objects[arm] = None
+                            
+                            # Update object position in self.objects (object falls to table)
+                            with self.objects_lock:
+                                if obj in self.objects:
+                                    # Object will fall to approximately table height
+                                    self.objects[obj]['position'] = [safe_x, safe_y, self.table_height]
+                            
+                            # Update TaskManager state
+                            self.task_manager.apply_action(action)
+                            
+                            # Re-infer state from poses (object is now on table after falling)
+                            time.sleep(0.5)  # Wait for object to settle
+                            self.task_manager.update_state_from_poses()
+                            
+                            self.get_logger().info(f'{arm}: ✓ Dropped {obj} from height z={drop_height}')
+                            # Note: Arm is already at z=0.5, so it's at safe height for next operation
+                            
                         except Exception as e:
-                            self.get_logger().warn(f'{arm}: Could not move to safe height ({e}), continuing anyway...')
-                            # Don't fail the whole operation if safe height movement fails
+                            self.get_logger().error(f'{arm}: Failed to drop {obj}: {e}')
+                            import traceback
+                            self.get_logger().error(traceback.format_exc())
+                            self._task_execution_in_progress.discard(execution_key)
+                            return False
                     else:
                         self.get_logger().warn(f'{arm}: put_down to non-table location not yet implemented')
                         self._task_execution_in_progress.discard(execution_key)
