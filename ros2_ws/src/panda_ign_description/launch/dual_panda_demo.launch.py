@@ -173,12 +173,15 @@ def generate_launch_description():
     )
     
     # Gripper controller spawner for Panda 2
-    gripper_controller_spawner_panda2 = Node(
-        package='controller_manager',
-        executable='spawner',
-        namespace='panda2',
-        arguments=['panda_gripper_controller', '--controller-manager', 'controller_manager', '--controller-manager-timeout', '30'],
-        parameters=[controllers_file],
+    # Check if controller already loaded to avoid fatal "already loaded" error
+    gripper_controller_spawner_panda2 = ExecuteProcess(
+        cmd=['bash', '-c',
+             'sleep 1.5 && '  # Wait for controller manager to be ready
+             'if timeout 3 ros2 control list_controllers --controller-manager /panda2/controller_manager 2>/dev/null | grep -q "panda_gripper_controller"; then '
+             '  echo "[INFO] panda_gripper_controller already loaded, skipping spawn"; '
+             'else '
+             '  ros2 run controller_manager spawner panda_gripper_controller --controller-manager controller_manager --controller-manager-timeout 30 --ros-args -r __ns:=/panda2 --params-file ' + controllers_file + ' || echo "[WARN] Spawn failed but continuing..."; '
+             'fi'],
         output='screen'
     )
     
