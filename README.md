@@ -192,16 +192,6 @@ This allows the system to insert the peg successfully even if the holding arm is
 
 -----
 
-## 🤝 Acknowledgments
-
-  * **Mr. Karan Muvvala** for initial idea formulation pertaining to TAMP.
-
-  * **Tools:** Code assistance and report drafting supported by LLMs and Cursor AI.
-
-  * **References:** Inspired by the "IKEA Bot" (Knepper et al., 2013) and Mars Rover planning systems (MAPGEN).
-
------
-
 ## 📄 License
 
 [MIT License](https://www.google.com/search?q=LICENSE)
