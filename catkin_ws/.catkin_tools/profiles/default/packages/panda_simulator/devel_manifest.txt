@@ -1,2 +1,0 @@
-panda_simulator/panda_simulator
-/home/perception/catkin_ws/devel/.private/panda_simulator/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock

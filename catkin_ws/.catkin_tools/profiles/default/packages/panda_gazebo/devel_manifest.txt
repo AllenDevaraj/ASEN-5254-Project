@@ -1,9 +1,0 @@
-panda_simulator/panda_gazebo
-/home/perception/catkin_ws/devel/.private/panda_gazebo/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock
-/home/perception/catkin_ws/devel/.private/panda_gazebo/share/panda_gazebo/cmake/panda_gazeboConfig.cmake /home/perception/catkin_ws/devel/share/panda_gazebo/cmake/panda_gazeboConfig.cmake
-/home/perception/catkin_ws/devel/.private/panda_gazebo/share/panda_gazebo/cmake/panda_gazeboConfig-version.cmake /home/perception/catkin_ws/devel/share/panda_gazebo/cmake/panda_gazeboConfig-version.cmake
-/home/perception/catkin_ws/devel/.private/panda_gazebo/lib/libpanda_gazebo_ros_control.so /home/perception/catkin_ws/devel/lib/libpanda_gazebo_ros_control.so
-/home/perception/catkin_ws/devel/.private/panda_gazebo/lib/libpanda_robot_hw_sim.so /home/perception/catkin_ws/devel/lib/libpanda_robot_hw_sim.so
-/home/perception/catkin_ws/devel/.private/panda_gazebo/lib/pkgconfig/panda_gazebo.pc /home/perception/catkin_ws/devel/lib/pkgconfig/panda_gazebo.pc
-/home/perception/catkin_ws/devel/.private/panda_gazebo/lib/panda_gazebo/force_neutral_pose.py /home/perception/catkin_ws/devel/lib/panda_gazebo/force_neutral_pose.py
-/home/perception/catkin_ws/devel/.private/panda_gazebo/lib/panda_gazebo/cmake.lock /home/perception/catkin_ws/devel/lib/panda_gazebo/cmake.lock

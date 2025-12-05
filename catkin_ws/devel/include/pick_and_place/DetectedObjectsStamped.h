@@ -1,1 +1,0 @@
-/home/perception/catkin_ws/devel/.private/pick_and_place/include/pick_and_place/DetectedObjectsStamped.h

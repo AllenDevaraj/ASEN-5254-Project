@@ -1,3 +1,0 @@
-franka_ros_interface/franka_tools
-/home/perception/catkin_ws/devel/.private/franka_tools/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock
-/home/perception/catkin_ws/devel/.private/franka_tools/lib/python3/dist-packages/franka_tools/__init__.py /home/perception/catkin_ws/devel/lib/python3/dist-packages/franka_tools/__init__.py

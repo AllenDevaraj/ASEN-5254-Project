@@ -1,2 +1,0 @@
-orocos_kinematics_dynamics/orocos_kinematics_dynamics
-/home/perception/catkin_ws/devel/.private/orocos_kinematics_dynamics/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock

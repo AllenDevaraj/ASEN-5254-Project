@@ -1,5 +1,0 @@
-panda_simulator/panda_hardware_interface
-/home/perception/catkin_ws/devel/.private/panda_hardware_interface/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock
-/home/perception/catkin_ws/devel/.private/panda_hardware_interface/share/panda_hardware_interface/cmake/panda_hardware_interfaceConfig.cmake /home/perception/catkin_ws/devel/share/panda_hardware_interface/cmake/panda_hardware_interfaceConfig.cmake
-/home/perception/catkin_ws/devel/.private/panda_hardware_interface/share/panda_hardware_interface/cmake/panda_hardware_interfaceConfig-version.cmake /home/perception/catkin_ws/devel/share/panda_hardware_interface/cmake/panda_hardware_interfaceConfig-version.cmake
-/home/perception/catkin_ws/devel/.private/panda_hardware_interface/lib/pkgconfig/panda_hardware_interface.pc /home/perception/catkin_ws/devel/lib/pkgconfig/panda_hardware_interface.pc

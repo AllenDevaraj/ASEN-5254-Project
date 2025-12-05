@@ -1,5 +1,0 @@
-Symlinking /home/perception/catkin_ws/devel/lib/python3/dist-packages/franka_tools/__init__.py
-Cleaning: (/home/test/catkin_ws/devel/.private/franka_tools/cmake.lock, /home/test/catkin_ws/devel/./cmake.lock)
-Cleaning: (/home/test/catkin_ws/devel/.private/franka_tools/lib/python3/dist-packages/franka_tools/__init__.py, /home/test/catkin_ws/devel/lib/python3/dist-packages/franka_tools/__init__.py)
-Unlinking: /home/test/catkin_ws/devel/lib/python3/dist-packages/franka_tools/__init__.py
-Already unlinked: {}

@@ -1,1 +1,0 @@
-/home/perception/catkin_ws/devel/.private/franka_hw/lib/pkgconfig/franka_hw.pc

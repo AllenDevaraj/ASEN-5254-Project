@@ -1,1 +1,0 @@
-/home/perception/catkin_ws/devel/.private/pick_and_place/share/gennodejs/ros/pick_and_place/msg/DetectedObjectsStamped.js

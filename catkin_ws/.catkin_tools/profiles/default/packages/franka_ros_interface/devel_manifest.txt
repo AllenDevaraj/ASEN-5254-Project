@@ -1,2 +1,0 @@
-franka_ros_interface/franka_ros_interface
-/home/perception/catkin_ws/devel/.private/franka_ros_interface/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock

@@ -1,5 +1,0 @@
-franka_panda_description
-/home/perception/catkin_ws/devel/.private/franka_panda_description/cmake.lock /home/perception/catkin_ws/devel/./cmake.lock
-/home/perception/catkin_ws/devel/.private/franka_panda_description/share/franka_panda_description/cmake/franka_panda_descriptionConfig.cmake /home/perception/catkin_ws/devel/share/franka_panda_description/cmake/franka_panda_descriptionConfig.cmake
-/home/perception/catkin_ws/devel/.private/franka_panda_description/share/franka_panda_description/cmake/franka_panda_descriptionConfig-version.cmake /home/perception/catkin_ws/devel/share/franka_panda_description/cmake/franka_panda_descriptionConfig-version.cmake
-/home/perception/catkin_ws/devel/.private/franka_panda_description/lib/pkgconfig/franka_panda_description.pc /home/perception/catkin_ws/devel/lib/pkgconfig/franka_panda_description.pc

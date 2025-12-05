@@ -1,1 +1,0 @@
-/home/perception/catkin_ws/devel/.private/franka_core_msgs/lib/pkgconfig/franka_core_msgs.pc

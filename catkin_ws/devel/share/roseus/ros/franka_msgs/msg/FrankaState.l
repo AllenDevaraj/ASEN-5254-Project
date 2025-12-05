@@ -1,1 +1,0 @@
-/home/perception/catkin_ws/devel/.private/franka_msgs/share/roseus/ros/franka_msgs/msg/FrankaState.l
