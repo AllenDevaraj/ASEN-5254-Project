@@ -1,190 +1,155 @@
-# ASEN-5254 Project: Panda Pick and Place
+Here is a comprehensive `README.md` file tailored to your project. It covers installation, usage, and a brief architectural overview, making it ready for GitHub.
 
-## 🎉 ROS2 Migration Complete!
+````markdown
+# Dual-Arm Cooperative Manipulation using TAMP
 
-This repository contains both the original ROS1 project and the newly migrated ROS2 version.
+![ROS2 Humble](https://img.shields.io/badge/ROS2-Humble-blue)
+![MoveIt 2](https://img.shields.io/badge/MoveIt-2-orange)
+![Gazebo](https://img.shields.io/badge/Ignition-Fortress-red)
+![Python](https://img.shields.io/badge/Python-3.10+-yellow)
 
-```
-ASEN-5254-Project/
-├── catkin_ws/              # Original ROS1 Noetic workspace
-│   └── src/
-│       └── pick_and_place/
-│
-├── ros2_ws/                # ✨ NEW: ROS2 Humble workspace
-│   ├── src/
-│   │   ├── pick_and_place/
-│   │   ├── pick_and_place_msgs/
-│   │   ├── franka_ros2/
-│   │   └── moveit_resources/
-│   ├── build_workspace.sh  # Automated build script
-│   ├── quick_start.sh      # Quick commands
-│   ├── README.md           # Complete user guide
-│   ├── SETUP_GUIDE.md      # Installation guide
-│   └── install/            # Built packages
-│
-└── MIGRATION_SUMMARY.md    # Detailed migration notes
-```
+**Author:** Allen Devaraj Augustin Ponraj  
+**Affiliation:** University of Colorado Boulder, Dept. of Aerospace Engineering Sciences
 
-## Quick Start (ROS2 Humble)
+## 📖 Overview
 
-### 1. Build the Workspace
+This project implements a **Task and Motion Planning (TAMP)** framework for a dual-arm robotic system. Two Franka Emika Panda arms coordinate to perform a multi-stage assembly task in a cluttered, unstructured environment.
 
-```bash
-cd ros2_ws
-./build_workspace.sh
-```
+The system autonomously:
+1.  **Reasons symbolically:** Detects if objects are stacked and plans "unstacking" operations before attempting retrieval.
+2.  **Plans motions:** Utilizes a hybrid approach combining **RRTConnect** (for global obstacle avoidance) and **Cartesian Interpolation** (for precise insertion).
+3.  **Executes cooperation:** Performs a frame-based "peg-in-hole" insertion where one arm stabilizes the receptacle while the other inserts the peg, regardless of the receptacle's orientation.
 
-### 2. Run Tests
-
-```bash
-./quick_start.sh test
-```
-
-### 3. Launch Simulation
-
-```bash
-source install/setup.bash
-ros2 launch pick_and_place panda_pick_and_place.launch.py
-```
-
-## What's New in ROS2
-
-✅ **Messages**: Custom ROS2 message definitions  
-✅ **Python Nodes**: All scripts ported to rclpy  
-✅ **Launch Files**: Python-based launch system  
-✅ **Build System**: colcon instead of catkin  
-✅ **Dependencies**: MoveIt2 and Gazebo integration  
-✅ **Documentation**: Complete guides and scripts  
-
-## Documentation
-
-- **[ros2_ws/README.md](ros2_ws/README.md)** - Complete ROS2 user guide
-- **[ros2_ws/SETUP_GUIDE.md](ros2_ws/SETUP_GUIDE.md)** - Detailed setup instructions
-- **[MIGRATION_SUMMARY.md](MIGRATION_SUMMARY.md)** - Full migration details
-- **[ros2_ws/quick_start.sh](ros2_ws/quick_start.sh)** - Convenient command shortcuts
-
-## System Requirements
-
-- **OS**: Ubuntu 22.04 LTS
-- **ROS**: ROS2 Humble
-- **Python**: 3.10+
-- **Gazebo**: Fortress or Garden
-
-## Features
-
-- 🤖 Panda robot simulation in Gazebo
-- 👁️ Vision-based object detection (RGB-D camera)
-- 🎯 Automated pick and place of colored blocks
-- 🔄 State machine for task management
-- 📦 Custom Gazebo models and world
-
-## Usage Commands
-
-### Build
-```bash
-cd ros2_ws
-./build_workspace.sh         # Normal build
-./build_workspace.sh --clean # Clean rebuild
-```
-
-### Test
-```bash
-./quick_start.sh test       # Verify installation
-./quick_start.sh run        # Show launch commands
-```
-
-### Run
-```bash
-source install/setup.bash
-ros2 launch pick_and_place panda_pick_and_place.launch.py
-```
-
-## Build Status
-
-| Package | Status |
-|---------|--------|
-| pick_and_place_msgs | ✅ Built |
-| pick_and_place | ✅ Built |
-| franka_msgs | ✅ Built |
-| moveit_resources_panda | ✅ Built |
-| **Total** | **9 packages** |
-
-## Verification
-
-All tests pass! ✅
-
-```bash
-$ cd ros2_ws && ./quick_start.sh test
-
-✓ pick_and_place package found
-✓ pick_and_place_msgs package found
-✓ DetectedObject message found
-✓ DetectedObjectsStamped message found
-✓ object_detector executable found
-✓ controller executable found
-✓ pick_and_place_state_machine executable found
-✓ World file found
-✓ Models directory found (9 models)
-
-✓ All checks passed! System is ready.
-```
-
-## Key Differences: ROS1 vs ROS2
-
-| Feature | ROS1 (catkin_ws) | ROS2 (ros2_ws) |
-|---------|------------------|----------------|
-| Build Tool | catkin | colcon |
-| Python API | rospy | rclpy + Node class |
-| Launch Files | XML | Python |
-| Messages | message_generation | rosidl_default_generators |
-| Workspace Layout | devel/ | install/ |
-
-## Next Steps
-
-1. **First time setup**: See [ros2_ws/SETUP_GUIDE.md](ros2_ws/SETUP_GUIDE.md)
-2. **Build the workspace**: Run `./build_workspace.sh` in ros2_ws/
-3. **Test the system**: Run `./quick_start.sh test` in ros2_ws/
-4. **Launch simulation**: Follow instructions in [ros2_ws/README.md](ros2_ws/README.md)
-
-## Troubleshooting
-
-See [ros2_ws/SETUP_GUIDE.md](ros2_ws/SETUP_GUIDE.md) for:
-- Installation issues
-- Build errors
-- Runtime problems
-- Gazebo configuration
-
-## Contributing
-
-This project was migrated from ROS1 to ROS2 for ASEN-5254.
-
-**Original Author**: Elena Oikonomou (ROS1 version, Fall 2023)  
-**ROS2 Port**: November 2025
-
-## License
-
-MIT License
+### 🎥 Demo
+*(Place your GIF or link to YouTube video here)*
 
 ---
 
-## 📋 Migration Checklist
+## ⚙️ Prerequisites
 
-- [x] ROS2 workspace structure created
-- [x] Custom messages ported to ROS2
-- [x] Python nodes converted to rclpy
-- [x] Launch files converted to Python
-- [x] Dependencies cloned and configured
-- [x] Build system working (colcon)
-- [x] Documentation written
-- [x] Automated scripts created
-- [x] All packages build successfully
-- [x] Tests pass
+* **OS:** Ubuntu 22.04 LTS (Jammy Jellyfish)
+* **Middleware:** ROS 2 Humble Hawksbill
+* **Simulation:** Ignition Gazebo Fortress (6.17.0+)
+* **Motion Planning:** MoveIt 2
 
-**Status: COMPLETE** ✅
+### System Dependencies
+Ensure you have the following ROS 2 packages installed:
 
-For detailed migration notes, see [MIGRATION_SUMMARY.md](MIGRATION_SUMMARY.md).
+```bash
+sudo apt update
+sudo apt install ros-humble-moveit \
+                 ros-humble-ros-gz \
+                 ros-humble-ros2-control \
+                 ros-humble-ros2-controllers \
+                 python3-tk  # For the custom GUI
+````
 
----
+-----
 
-**Ready to use!** Start with `cd ros2_ws && ./quick_start.sh test`
+## 🛠️ Installation
 
+1.  **Create a ROS 2 Workspace:**
+
+    ```bash
+    mkdir -p ~/tamp_ws/src
+    cd ~/tamp_ws/src
+    ```
+
+2.  **Clone the Repository:**
+
+    ```bash
+    git clone [https://github.com/YOUR_USERNAME/dual_arm_tamp.git](https://github.com/YOUR_USERNAME/dual_arm_tamp.git) .
+    ```
+
+3.  **Install Python Dependencies:**
+
+    ```bash
+    pip3 install scipy numpy
+    ```
+
+4.  **Build the Workspace:**
+
+    ```bash
+    cd ~/tamp_ws
+    colcon build --symlink-install
+    source install/setup.bash
+    ```
+
+-----
+
+## 🚀 Usage
+
+The entire system (Simulation, MoveIt, Perception, and GUI) is orchestrated by a single launch file.
+
+### 1\. Launch the System
+
+```bash
+ros2 launch pick_and_place dual_panda_single_group.launch.py
+```
+
+### 2\. Using the Control GUI
+
+Once the simulation loads, the **Dual Panda Control** interface will appear.
+
+  * **Live Monitor:** Check the right-hand panel to ensure "Ground Truth" poses are being received from Gazebo.
+  * **Manual Control:** Use the "Panda 1" and "Panda 2" panels to test IK solutions (Move/Plan Only).
+  * **Run the Task:**
+    1.  Select **Global Controls** -\> `Move Both to Neutral`.
+    2.  In the **Dual Arm Tasks** section:
+          * Select the target objects (e.g., `red_hollow` and `red_solid`).
+          * Click **"Insert Prep"**: This triggers the TAMP solver. The robot will automatically unstack blocking objects if necessary.
+          * Click **"Insert"**: Executes the final Cartesian approach and insertion.
+
+-----
+
+## 🧩 Architecture
+
+### Hierarchical TAMP Pipeline
+
+  * **Perception:** `ros_gz_bridge` provides ground-truth poses to a `PerceptionOracle` node.
+  * **Symbolic State:** The `TaskManager` maintains predicates (e.g., `ON(A, B)`, `HOLDING(Arm, A)`) to generate high-level plans.
+  * **Geometric Planning:**
+      * **Transport Phase:** RRTConnect (OMPL) for collision-free travel.
+      * **Insertion Phase:** Jacobian-based Cartesian path planning for linear motion.
+
+### Coordinate Frames
+
+The insertion logic uses a relative frame chain:
+`World -> Hollow_Object -> Insertion_Frame -> Solid_Object -> Gripper`
+
+This allows the system to insert the peg successfully even if the holding arm is positioned at an arbitrary angle.
+
+-----
+
+## 📂 Project Structure
+
+```text
+.
+├── config/                 # SRDF, Kinematics, and MoveIt configs
+├── launch/
+│   └── dual_panda_single_group.launch.py  # Master launch file
+├── models/                 # SDF models (tables, blocks, pegs)
+├── src/
+│   ├── task_manager.py     # Symbolic planning logic
+│   ├── gui_control.py      # Tkinter interface
+│   └── perception_bridge.py # Sim-to-Real pose converter
+├── urdf/                   # Unified dual-arm description
+└── README.md
+```
+
+-----
+
+## 🤝 Acknowledgments
+
+  * **Mr. Karan Muvvala** for initial idea formulation pertaining to TAMP.
+  * **Tools:** Code assistance and report drafting supported by LLMs and Cursor AI.
+  * **References:** Inspired by the "IKEA Bot" (Knepper et al., 2013) and Mars Rover planning systems (MAPGEN).
+
+-----
+
+## 📄 License
+
+[MIT License](https://www.google.com/search?q=LICENSE)
+
+```
+```
