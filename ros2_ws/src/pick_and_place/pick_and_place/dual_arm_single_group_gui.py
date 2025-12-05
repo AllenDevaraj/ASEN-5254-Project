@@ -355,7 +355,7 @@ class DualPandaUnifiedNode(Node):
         
         # Pre-insertion gap (distance from solid to hollow opening)
         self.pre_insert_gap = 0.30  # 30cm standoff (increased from 25cm for better reachability)
-        self.insert_depth = 0.20  # 20cm insertion depth
+        self.insert_depth = 0.18  # 20cm insertion depth
         
         # Initialize Task Manager for TAMP (Task and Motion Planning)
         self.task_manager = TaskManager(
