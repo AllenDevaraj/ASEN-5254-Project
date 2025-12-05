@@ -1,5 +1,3 @@
-Here is a comprehensive `README.md` file tailored to your project. It covers installation, usage, and a brief architectural overview, making it ready for GitHub.
-
 ````markdown
 # Dual-Arm Cooperative Manipulation using TAMP
 
