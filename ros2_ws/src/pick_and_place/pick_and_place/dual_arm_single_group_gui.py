@@ -1,18 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Tkinter GUI for unified dual Panda control with SINGLE MoveIt move_group.
-
-KEY DIFFERENCES from dual_arm_gui.py:
-1. Uses SINGLE move_group (no namespace) instead of two separate ones
-2. Specifies planning_group ('panda1_arm' or 'panda2_arm') in MoveIt requests
-3. Uses prefixed joint names (panda1_joint1, panda2_joint1, etc.)
-4. Subscribes to unified /joint_states (combined from both robots)
-5. No need to manually publish collision objects for the other arm (MoveIt knows both)
-
-This is a skeleton showing the structural changes. Most logic from dual_arm_gui.py
-can be reused with these modifications.
-"""
+"""Tkinter GUI for unified dual Panda control with single MoveIt move_group."""
 
 import math
 import threading
@@ -42,16 +30,7 @@ from pick_and_place.task_manager import TaskManager
 
 
 class DualPandaUnifiedNode(Node):
-    """
-    ROS2 node for unified dual Panda control via single move_group.
-    
-    NOTE: This is a skeleton showing the structure. It will not work until:
-    1. Unified URDF is generated (with prefixed links: panda1_link0, panda2_link0, etc.)
-    2. MoveGroup successfully loads with both planning groups
-    3. Joint state merger node combines joint states with prefixes
-    
-    The logic follows the same patterns as dual_arm_gui.py, just adapted for single move_group.
-    """
+    """ROS2 node for unified dual Panda control via single move_group."""
 
     def __init__(self) -> None:
         super().__init__('dual_panda_unified_gui_node')
@@ -88,18 +67,12 @@ class DualPandaUnifiedNode(Node):
         self.ee_poses = {'panda1': None, 'panda2': None}
         self.fk_futures = {'panda1': None, 'panda2': None}
 
-        # ============================================================
-        # KEY CHANGE: Single move_group services (no namespace)
-        # ============================================================
-        # Unified MoveIt service clients (under move_group node name)
-        # Try with node name prefix first, fallback to root if needed
+        # Unified MoveIt service clients
         self.ik_client = self.create_client(GetPositionIK, '/move_group/compute_ik')
         self.fk_client = self.create_client(GetPositionFK, '/move_group/compute_fk')
         self.cartesian_path_client = self.create_client(GetCartesianPath, '/move_group/compute_cartesian_path')
         
-        # MoveIt Motion Planning service for OMPL planning (full motion planning with curved paths)
-        # This uses OMPL planners (RRT, RRTConnect, etc.) to automatically find collision-free curved paths
-        # Service interface: moveit_msgs/srv/GetMotionPlan
+        # OMPL motion planning service
         self.motion_plan_client = self.create_client(
             GetMotionPlan,
             '/plan_kinematic_path'
@@ -110,9 +83,7 @@ class DualPandaUnifiedNode(Node):
             '/move_group/plan_kinematic_path'
         )
         
-        # MoveIt ExecuteTrajectory action for executing planned trajectories through MoveIt
-        # This allows MoveIt to monitor execution and handle collisions better
-        # Try both possible action paths
+        # ExecuteTrajectory action clients
         self.execute_trajectory_action = ActionClient(
             self,
             ExecuteTrajectory,
@@ -151,7 +122,6 @@ class DualPandaUnifiedNode(Node):
             '/panda2/panda_gripper_controller/gripper_cmd',
         )
         
-        # Wait for services (MoveIt takes time to start up)
         self.get_logger().info('Waiting for unified MoveIt services (this may take 10-20 seconds)...')
         self.services_available = {
             'ik': False,
@@ -268,18 +238,12 @@ class DualPandaUnifiedNode(Node):
         self.traj_client_panda1.wait_for_server(timeout_sec=5.0)
         self.traj_client_panda2.wait_for_server(timeout_sec=5.0)
         
-        # ============================================================
-        # KEY CHANGE: Single planning scene publisher (no namespace)
-        # ============================================================
         self.planning_scene_pub = self.create_publisher(
             PlanningScene,
             '/monitored_planning_scene',
             10
         )
         
-        # ============================================================
-        # KEY CHANGE: Subscribe to unified /joint_states
-        # ============================================================
         self.joint_state_sub = self.create_subscription(
             JointState,
             '/joint_states',  # Unified topic (combined from both robots)
@@ -287,9 +251,7 @@ class DualPandaUnifiedNode(Node):
             10
         )
         
-        # CRITICAL: Subscribe to object poses EARLY (before any blocking operations)
-        # This ensures the subscription is registered immediately when the node starts
-        self.get_logger().info('Creating subscription to /objects_poses_sim (CRITICAL FOR LIVE POSES)...')
+        self.get_logger().info('Creating subscription to /objects_poses_sim...')
         self.pose_sub = self.create_subscription(
             TFMessage,
             '/objects_poses_sim',
@@ -321,35 +283,13 @@ class DualPandaUnifiedNode(Node):
         self.held_objects = {'panda1': None, 'panda2': None}
         self.collision_object_ids = {'panda1': set(), 'panda2': set()}  # Track per arm
         
-        # ============================================================
-        # FRAME-BASED INSERTION: Fixed geometric transforms
-        # ============================================================
-        # H - hollow block body frame (at geometric center)
-        # S - solid block body frame (at geometric center)
-        # I - insertion frame at the mouth of the hollow block
-        # G_h - hollow gripper TCP frame when grasping hollow
-        # G_s - solid gripper TCP frame when grasping solid
-        
-        # Hollow dimensions: [length_x=0.08, width_y=0.05, height_z=0.05]
-        # Solid dimensions: [width_x=0.025, depth_y=0.025, height_z=0.08] (upright)
-        
-        # ^H T_I: Hollow body frame to insertion frame (at opening face)
-        # The opening is on the face with normal pointing toward -X (toward Panda 1)
-        # Insertion frame I is at the center of the opening face
-        # Position: half length forward along -X axis from hollow center
+        # Frame-based insertion transforms
         self.H_T_I_position = [-0.08/2, 0.0, 0.0]  # Half length forward (opening is on -X face)
         self.H_T_I_orientation = [0.0, 0.0, 0.0, 1.0]  # Identity (same orientation as H)
         
-        # ^S T_Gs: Solid body frame to solid gripper TCP
-        # Solid is upright (height_z=0.08), gripper grasps it from sides
-        # When solid is held horizontally, its center aligns with gripper TCP
-        # Offset: solid center is at gripper TCP (no offset needed)
         self.S_T_Gs_position = [0.0, 0.0, 0.0]  # Solid center = gripper TCP
         self.S_T_Gs_orientation = [0.0, 0.0, 0.0, 1.0]  # Identity (solid orientation = gripper orientation when held)
         
-        # ^H T_Gh: Hollow body frame to hollow gripper TCP
-        # Hollow is held by Panda 2, gripper grasps it from sides
-        # Hollow center is at gripper TCP (no offset needed)
         self.H_T_Gh_position = [0.0, 0.0, 0.0]  # Hollow center = gripper TCP
         self.H_T_Gh_orientation = [0.0, 0.0, 0.0, 1.0]  # Identity
         
@@ -367,8 +307,6 @@ class DualPandaUnifiedNode(Node):
         
         # Initialize planning scene
         self._setup_planning_scene()
-        
-        # NOTE: Pose subscription was already created above (before objects/planning scene setup)
     
     def _joint_state_callback(self, msg: JointState):
         """Handle unified joint_states (contains both panda1_* and panda2_* joints)."""
@@ -385,7 +323,7 @@ class DualPandaUnifiedNode(Node):
             elif name.startswith('panda2_'):
                 panda2_joints_dict[name] = msg.position[i] if i < len(msg.position) else 0.0
         
-        # Trigger FK requests for both arms (CRITICAL for end-effector pose tracking)
+        # Trigger FK requests for both arms
         # In unified setup, FK needs FULL unified joint state (both arms)
         for arm in ['panda1', 'panda2']:
             # Check if we should trigger FK (not already running)
@@ -406,14 +344,12 @@ class DualPandaUnifiedNode(Node):
                 obj_name = transform.child_frame_id
                 
                 if obj_name in self.objects:
-                    # Update position
                     trans = transform.transform.translation
                     old_pos = self.objects[obj_name].get('position', [0, 0, 0])
                     new_pos = [trans.x, trans.y, trans.z]
                     self.objects[obj_name]['position'] = new_pos
                     updated_objects.append(obj_name)
                     
-                    # Update Orientation (RPY)
                     q = [
                         transform.transform.rotation.x,
                         transform.transform.rotation.y,
@@ -463,7 +399,6 @@ class DualPandaUnifiedNode(Node):
         req.header.stamp = self.get_clock().now().to_msg()
         req.fk_link_names = [f'panda{1 if arm == "panda1" else 2}_link8']  # End-effector link (tip of arm chain)
         
-        # CRITICAL: Use FULL unified joint state (contains both panda1_* and panda2_* joints)
         # MoveIt needs the complete robot state in unified setup
         req.robot_state.joint_state = joint_state
         
@@ -480,10 +415,7 @@ class DualPandaUnifiedNode(Node):
                     # Pose in robot base frame
                     local_pose = resp.pose_stamped[0].pose
                     
-                    # Transform to World (Manual TF)
                     robot = self.robot_poses[arm]
-                    
-                    # Rotate Local Position by Robot Yaw
                     cos_yaw = math.cos(robot['yaw'])
                     sin_yaw = math.sin(robot['yaw'])
                     
@@ -495,7 +427,6 @@ class DualPandaUnifiedNode(Node):
                     wy = lx * sin_yaw + ly * cos_yaw + robot['y']
                     wz = lz + robot['z']
                     
-                    # Rotate Orientation: Convert quat to RPY, add robot yaw
                     q = [local_pose.orientation.x, local_pose.orientation.y, local_pose.orientation.z, local_pose.orientation.w]
                     
                     sinr_cosp = 2 * (q[3] * q[0] + q[1] * q[2])
@@ -512,7 +443,6 @@ class DualPandaUnifiedNode(Node):
                     cosy_cosp = 1 - 2 * (q[1] * q[1] + q[2] * q[2])
                     l_yaw = math.atan2(siny_cosp, cosy_cosp)
                     
-                    # Add base yaw
                     w_yaw = l_yaw + robot['yaw']
                     w_roll = l_roll
                     w_pitch = l_pitch
@@ -540,9 +470,7 @@ class DualPandaUnifiedNode(Node):
         with self.objects_lock:
             objects_copy = {k: v.copy() for k, v in self.objects.items()}
         
-        # CRITICAL: Refresh object poses from live data if available
         if use_live_poses:
-            # Wait a bit for latest pose updates
             time.sleep(0.1)
             # The objects dictionary should already be updated by _sim_pose_callback, but we'll log it
             for obj_name in objects_copy.keys():
@@ -608,7 +536,6 @@ class DualPandaUnifiedNode(Node):
             scene.world.collision_objects.append(obj)
             self.get_logger().debug(f'[COLLISION] Added {obj_name} at ({world_pose.position.x:.3f}, {world_pose.position.y:.3f}, {world_pose.position.z:.3f})')
         
-        # CRITICAL: Also include the other arm's current state in the planning scene
         # This ensures MoveIt knows about the other arm's position for collision checking
         if self.joint_state:
             # Set robot state in planning scene so MoveIt knows both arms' positions
@@ -622,11 +549,9 @@ class DualPandaUnifiedNode(Node):
             time.sleep(0.15)  # Increased delay to ensure MoveIt processes each update
         self.get_logger().info(f'[COLLISION] Planning scene published (unified) - {len(scene.world.collision_objects)} collision objects (table + {len(scene.world.collision_objects) - 1} objects) + robot state')
         
-        # CRITICAL: Wait longer for scene to be processed by MoveIt before planning
-        # MoveIt needs time to process the planning scene and update its internal collision checker
-        time.sleep(1.0)  # Increased from 0.8 to 1.0 seconds - ensures MoveIt has processed the scene
+        time.sleep(1.0)
         
-        return scene  # Return scene so it can be attached to planning requests
+        return scene
     
     def get_pose(self, object_name: str) -> dict:
         """Get the latest pose of an object (thread-safe)."""
@@ -665,7 +590,6 @@ class DualPandaUnifiedNode(Node):
         pose_stamped.pose = pose
         request.ik_request.pose_stamped = pose_stamped
         
-        # CRITICAL: Provide FULL unified joint state (both arms) so MoveIt can automatically
         # check collisions between both arms. This is the whole point of unified MoveIt!
         if self.joint_state:
             # Include ALL joints from unified joint_state (both panda1_* and panda2_* joints)
@@ -713,7 +637,6 @@ class DualPandaUnifiedNode(Node):
         traj = JointTrajectory()
         
         # REMAP: Controllers expect non-prefixed joint names (panda_joint1, not panda1_joint1)
-        # MoveIt returns prefixed names (panda1_joint1, panda2_joint1), but hardware controllers expect panda_joint1
         # Strip the numeric prefix: panda1_joint1 -> panda_joint1, panda2_joint1 -> panda_joint1
         controller_joint_names = []
         for name in self.joint_names[arm]:
@@ -804,9 +727,8 @@ class DualPandaUnifiedNode(Node):
         request.waypoints = waypoints
         request.max_step = 0.01  # Small steps for smooth motion
         request.jump_threshold = 0.0  # No jumps allowed
-        request.avoid_collisions = True  # CRITICAL: Enable collision checking - must not collide with obstacles
+        request.avoid_collisions = True
         
-        # CRITICAL: Provide FULL unified joint state (both arms) so MoveIt can automatically
         # check collisions between both arms and objects. This is the whole point of unified MoveIt!
         if not self.joint_state:
             self.get_logger().error(f'[COLLISION ERROR] No joint state available for {arm}! MoveIt cannot check collisions!')
@@ -817,7 +739,6 @@ class DualPandaUnifiedNode(Node):
         # Also set the robot state flag to indicate this is a complete state (not a diff)
         request.start_state.is_diff = False  # Complete state for proper collision checking
         
-        # CRITICAL: Verify joint state includes both arms
         joint_names = request.start_state.joint_state.name
         has_panda1 = any('panda1_' in name for name in joint_names)
         has_panda2 = any('panda2_' in name for name in joint_names)
@@ -835,7 +756,6 @@ class DualPandaUnifiedNode(Node):
         if not response:
             raise RuntimeError('Cartesian path service call failed.')
         
-        # CRITICAL: Reject ANY path that is not 100% feasible to prevent collisions
         # If a path is only partially feasible, it means it hit an obstacle mid-path, which WILL cause collisions
         # Only allow paths that are 99%+ feasible (to account for minor numerical rounding errors)
         if response.fraction < 0.99:
@@ -850,14 +770,12 @@ class DualPandaUnifiedNode(Node):
         if not response.solution.joint_trajectory.points:
             raise RuntimeError('No trajectory points in cartesian path response')
         
-        # If caller wants full trajectory (for MoveIt execution), return it
         if return_full_trajectory:
             # Create RobotTrajectory message for MoveIt execution
             robot_trajectory = RobotTrajectory()
             robot_trajectory.joint_trajectory = response.solution.joint_trajectory
             return robot_trajectory
         
-        # Return joint positions from last waypoint (for backward compatibility)
         # Need to map from unified names to arm-specific order
         last_point = response.solution.joint_trajectory.points[-1]
         joint_map = {name: pos for name, pos in zip(
@@ -868,7 +786,6 @@ class DualPandaUnifiedNode(Node):
         try:
             return [joint_map[name] for name in self.joint_names[arm]]
         except KeyError as e:
-            # If unified response returns all joints, we filter. If it returns partial, we match.
             raise RuntimeError(f"Missing joint in Cartesian response: {e}")
     
     def _plan_with_ompl(self, target_pose: Pose, arm: str = 'panda1', planner_id: str = 'RRTConnect', planning_scene: PlanningScene = None, relax_orientation: bool = False) -> RobotTrajectory:
@@ -878,7 +795,7 @@ class DualPandaUnifiedNode(Node):
         This uses OMPL planners which can automatically find curved paths around obstacles,
         unlike Cartesian path planning which only does straight-line segments.
         
-        CRITICAL: Planning scene must be provided or set up beforehand so OMPL can see obstacles.
+            Planning scene must be provided or set up beforehand.
         
         Args:
             target_pose: Target end-effector pose in robot base frame
@@ -897,12 +814,10 @@ class DualPandaUnifiedNode(Node):
         if not self.joint_state:
             raise RuntimeError(f'No joint state available for {arm} - cannot plan with OMPL')
         
-        # CRITICAL: Ensure planning scene is set up with latest object poses BEFORE planning
         # This ensures OMPL can see all obstacles (table, objects, other arm)
         if planning_scene is None:
             self.get_logger().info(f'{arm}: Setting up planning scene before OMPL planning...')
             planning_scene = self._setup_planning_scene(use_live_poses=True)
-            # Additional wait after scene setup to ensure MoveIt has processed it
             time.sleep(0.5)
         
         # Try primary service path first, fallback to alternatives
@@ -926,8 +841,6 @@ class DualPandaUnifiedNode(Node):
         plan_request.allowed_planning_time = 5.0
         plan_request.planner_id = planner_id  # OMPL planner (RRTConnect, RRT, etc.)
         
-        # Set start state (current joint positions) - CRITICAL for collision checking
-        # CRITICAL: Verify unified joint state includes both arms before planning
         if not self.joint_state:
             raise RuntimeError(f'[OMPL] Unified joint state not available for {arm} - cannot plan with OMPL')
         
@@ -942,9 +855,7 @@ class DualPandaUnifiedNode(Node):
         plan_request.start_state.joint_state = self.joint_state
         plan_request.start_state.is_diff = False  # Complete state for collision checking
         
-        # CRITICAL: The planning scene has already been published to /monitored_planning_scene
         # MoveIt's PlanningSceneMonitor subscribes to this topic and maintains the scene
-        # We've already waited 1.0+ seconds after publishing, so MoveIt should have processed it
         # The planning scene is automatically used by OMPL during planning through PlanningSceneMonitor
         self.get_logger().info(f'[COLLISION] Planning scene published with {len(planning_scene.world.collision_objects)} collision objects - MoveIt should see them via PlanningSceneMonitor')
         
@@ -1064,7 +975,6 @@ class DualPandaUnifiedNode(Node):
                 self.get_logger().error(f'MoveIt ExecuteTrajectory action server not available at either path!')
                 return False
         
-        # CRITICAL: Filter trajectory to only include joints for this arm
         # MoveIt's ExecuteTrajectory needs trajectory with joints that match the controller
         # Controller config expects prefixed names (panda1_joint1, panda2_joint1)
         # Filter to only include this arm's joints
@@ -1118,7 +1028,6 @@ class DualPandaUnifiedNode(Node):
             # Fallback to direct execution if MoveIt execution fails
             return self._execute_trajectory_direct(robot_trajectory, arm=arm)
         
-        # Wait for execution to complete
         # Check goal status instead of result.error_code (ROS2 action structure)
         import time
         start_time = time.time()
@@ -1221,17 +1130,14 @@ class DualPandaUnifiedNode(Node):
         if not self.joint_state:
             raise RuntimeError(f'No joint state available for {arm} - cannot plan path')
         
-        # CRITICAL: Ensure planning scene is up-to-date with LIVE poses before planning
         # NOTE: The caller should have already called _setup_planning_scene() and _add_held_object_as_collision()
         # We refresh here as a safety measure, but this should NOT remove held object collisions
         # because _setup_planning_scene() only adds/updates objects, it doesn't remove existing collision objects
         self.get_logger().info(f'{arm}: Ensuring planning scene is up-to-date with LIVE poses before path planning...')
         
-        # CRITICAL: Set up planning scene with LIVE object poses from Gazebo
-        # This ensures collision objects are at their ACTUAL current positions
-        planning_scene = self._setup_planning_scene(use_live_poses=True)  # Returns scene for attachment to request
+        planning_scene = self._setup_planning_scene(use_live_poses=True)
         
-        # CRITICAL: Verify joint state includes both arms for collision checking
+ for collision checking
         # Without complete joint state, MoveIt cannot check collisions between arms!
         if self.joint_state:
             panda1_joints = [name for name in self.joint_state.name if name.startswith('panda1_')]
@@ -1285,7 +1191,6 @@ class DualPandaUnifiedNode(Node):
             
             # If path is long (>15cm), add intermediate waypoints
             if distance > 0.15:
-                # CRITICAL: Ensure waypoints are always above the table to avoid collisions
                 # Table is at Z=0.2m, so waypoints must be at least 0.25m above table (Z >= 0.45m)
                 table_z = self.table_height  # 0.2m
                 min_clearance_above_table = 0.25  # 25cm clearance above table
@@ -1320,7 +1225,6 @@ class DualPandaUnifiedNode(Node):
                     dist_to_other = math.sqrt((path_mid_x - other_x)**2 + (path_mid_y - other_y)**2)
                     
                     if dist_to_other < 0.25:  # Other arm is within 25cm of path center
-                        # CRITICAL: Add MULTIPLE waypoints to create a smooth arc around the other arm
                         # Cartesian path planning uses straight-line segments, so we need many waypoints
                         # to approximate a curved path around Panda 2
                         
@@ -1428,7 +1332,6 @@ class DualPandaUnifiedNode(Node):
             # OMPL uses the unified joint state and planning scene to see all obstacles
             try:
                 self.get_logger().info(f'{arm}: Using OMPL motion planning (RRTConnect) for automatic curved path planning around obstacles...')
-                # CRITICAL: Pass planning scene to OMPL so it sees all obstacles (table, objects, other arm)
                 # OMPL will automatically find the best path around Panda 2's arm
                 robot_trajectory = self._plan_with_ompl(target_pose, arm=arm, planner_id='RRTConnect', planning_scene=planning_scene)
                 planning_method_used = "OMPL"
@@ -1451,7 +1354,6 @@ class DualPandaUnifiedNode(Node):
         if not self.execute_trajectory_moveit(robot_trajectory, arm=arm):
             raise RuntimeError(f'Failed to execute trajectory through MoveIt for {arm}')
         
-        # Return target joint positions (extract from last point for backward compatibility)
         last_point = robot_trajectory.joint_trajectory.points[-1]
         joint_map = {name: pos for name, pos in zip(
             robot_trajectory.joint_trajectory.joint_names,
@@ -1472,13 +1374,11 @@ class DualPandaUnifiedNode(Node):
         """
         import time
         
-        # CRITICAL: Set up planning scene BEFORE picking to ensure collision-free planning
         # This ensures MoveIt knows about the table, all objects, and both arms
         self.get_logger().info(f'{arm}: Setting up planning scene for collision-free pick operation...')
         self._setup_planning_scene()  # This now includes robot state (both arms) for collision checking
-        time.sleep(0.5)  # Wait for planning scene to be processed by MoveIt (increased from 0.3)
+        time.sleep(0.5)
         
-        # CRITICAL FIX: Force pose refresh - wait for pose callback to update
         # Read pose multiple times with small delays to ensure we get the latest
         initial_pose = self.get_pose(object_name)
         time.sleep(0.1)  # Give callback time to update
@@ -1560,7 +1460,7 @@ class DualPandaUnifiedNode(Node):
             self.send_joint_trajectory(pre_grasp_joints, arm=arm, seconds=3.0)
             
             # RE-READ POSE for Real-Time Precision - Force fresh read with delays
-            time.sleep(0.2)  # Wait for callback to process latest Gazebo pose
+            time.sleep(0.2)
             obj_data = self.get_pose(object_name)
             if not obj_data:
                 raise RuntimeError(f'Failed to re-read pose for {object_name} before descent')
@@ -1597,7 +1497,6 @@ class DualPandaUnifiedNode(Node):
             world_new_pre_grasp.position.y = obj_world_pos[1]
             world_new_pre_grasp.position.z = new_obj_top_z + 0.15
             
-            # Transform to robot base frame (CRITICAL for correct picking)
             new_pre_grasp_pose = self._transform_to_robot_frame(world_new_pre_grasp, arm)
             new_pre_grasp_pose.orientation.x = qx
             new_pre_grasp_pose.orientation.y = qy
@@ -1605,7 +1504,6 @@ class DualPandaUnifiedNode(Node):
             new_pre_grasp_pose.orientation.w = qw
 
             # Calculate New Grasp Pose (At object center) - Transform to robot frame
-            # CRITICAL FIX: Use ACTUAL object position instead of hardcoded table height
             # This fixes the issue where red_hollow (z=0.231) was hitting the table
             # Objects may not be exactly at table_height + obj_size[2]/2, so use their actual position
             obj_center_z_actual = obj_world_pos[2]  # Use actual object center Z from live pose
@@ -1627,14 +1525,13 @@ class DualPandaUnifiedNode(Node):
             grasp_pose.orientation.z = qz
             grasp_pose.orientation.w = qw
             
-            # CRITICAL: Use multi-waypoint collision-free descent (same logic as insertion)
             # Instead of direct straight-line descent, use intermediate waypoints to help MoveIt avoid obstacles
             self.get_logger().info(f'{arm}: Planning collision-free descent path with intermediate waypoints...')
             
             # Refresh planning scene before descent to ensure MoveIt knows about all obstacles
             self.get_logger().info(f'{arm}: Refreshing planning scene before descent for collision-free planning...')
             self._setup_planning_scene()  # Ensure table, all objects, and both arms are known
-            time.sleep(0.5)  # Wait for planning scene to be processed (increased from 0.2)
+            time.sleep(0.5)
             
             # Multi-waypoint descent: Pre-grasp → Intermediate waypoint (clear obstacles) → Grasp
             # This helps MoveIt find a collision-free path, especially around the table
@@ -1685,7 +1582,7 @@ class DualPandaUnifiedNode(Node):
             # GripperCommand action handles mimic joints automatically to ensure symmetric closing
             self.get_logger().info(f'{arm}: Closing gripper symmetrically to grasp object...')
             self.send_gripper_goal(0.01, arm=arm)  # GripperCommand automatically ensures both fingers close equally
-            time.sleep(1.5)  # Wait for gripper to fully close and ensure object is centered
+            time.sleep(1.5)
             
             # Verify gripper is closed symmetrically (check mimic joint positions match)
             if self.joint_state:
@@ -1764,9 +1661,8 @@ class DualPandaUnifiedNode(Node):
             if not self.execute_trajectory_moveit(lift_trajectory, arm=arm):
                 raise RuntimeError(f'{arm}: Failed to execute lift trajectory through MoveIt')
             
-            # CRITICAL: Verify object was actually grasped by checking if it moved with the gripper
             self.get_logger().info(f'{arm}: Verifying grasp - checking if {object_name} moved with gripper...')
-            time.sleep(0.3)  # Wait for object pose to update in simulation
+            time.sleep(0.3)
             post_lift_pose = self.get_pose(object_name)
             if not post_lift_pose:
                 self.get_logger().error(f'{arm}: Cannot verify grasp - failed to get object pose after lift')
@@ -1849,7 +1745,6 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().info(f'{arm}: Pick complete!')
             self.held_objects[arm] = object_name
             
-            # Return final joint positions for potential J7 offset (used by prepare_for_insertion)
             # Get current joint state for potential use
             final_joints = None
             if self.joint_state:
@@ -1868,7 +1763,6 @@ class DualPandaUnifiedNode(Node):
             import traceback
             self.get_logger().error(traceback.format_exc())
             
-            # CRITICAL: Recovery movement - move arm to safe position so it's not stuck
             self.get_logger().info(f'{arm}: Attempting recovery movement to safe position...')
             try:
                 import time
@@ -1986,7 +1880,7 @@ class DualPandaUnifiedNode(Node):
             # 3. Open Gripper IMMEDIATELY (object is already at place position)
             self.get_logger().info(f'{arm}: Releasing object...')
             self.send_gripper_goal(0.04, arm=arm)
-            time.sleep(1.0)  # Wait for gripper to open
+            time.sleep(1.0)
             
             # 4. Detach - UNIFIED PUBLISHER
             if obj_name != "unknown":
@@ -2006,7 +1900,7 @@ class DualPandaUnifiedNode(Node):
                 self.held_objects[arm] = None
                 self.get_logger().info(f'{arm}: ✓ Object {obj_name} dropped successfully!')
             
-            # 5. Retreat - WORLD FRAME (optional/non-critical - skip if fails)
+            # 5. Retreat - WORLD FRAME
             # Object is already dropped, so retreat failure shouldn't prevent success
             # This allows TAMP to proceed to next action (picking green_hollow)
             world_retreat = Pose()
@@ -2015,7 +1909,7 @@ class DualPandaUnifiedNode(Node):
             world_retreat.position.z = world_target.position.z + 0.15
             world_retreat.orientation = world_target.orientation
             
-            self.get_logger().info(f'{arm}: Attempting to retreat (non-critical - will continue even if fails)...')
+            self.get_logger().info(f'{arm}: Attempting to retreat...')
             try:
                 # Try OMPL planning for better obstacle avoidance
                 retreat_pose = self._transform_to_robot_frame(world_retreat, arm)
@@ -2131,13 +2025,12 @@ class DualPandaUnifiedNode(Node):
                                     self._task_execution_in_progress.discard(execution_key)
                                     return False
                             
-                            # Wait a moment to ensure we're at the drop position
                             time.sleep(0.5)
                             
                             # Drop the object by opening gripper
                             self.get_logger().info(f'{arm}: Dropping {obj} by opening gripper...')
                             self.send_gripper_goal(0.04, arm=arm)  # Open gripper
-                            time.sleep(1.0)  # Wait for object to fall
+                            time.sleep(1.0)
                             
                             # Clear held object status
                             self.held_objects[arm] = None
@@ -2152,7 +2045,7 @@ class DualPandaUnifiedNode(Node):
                             self.task_manager.apply_action(action)
                             
                             # Re-infer state from poses (object is now on table after falling)
-                            time.sleep(0.5)  # Wait for object to settle
+                            time.sleep(0.5)
                             self.task_manager.update_state_from_poses()
                             
                             self.get_logger().info(f'{arm}: ✓ Dropped {obj} from height z={drop_height}')
@@ -2187,15 +2080,10 @@ class DualPandaUnifiedNode(Node):
     
     def prepare_for_insertion(self, object_name: str, arm: str = 'panda2') -> bool:
         """Pick up object and move to assembly pose with 90deg rotation. Adapted for unified setup."""
-        import time  # Import time for sleep calls
+        import time
         
-        # ============================================================
-        # TAMP: Check if object is graspable and generate plan
-        # ============================================================
         self.get_logger().info(f'{arm}: TAMP - Checking if {object_name} is graspable...')
         
-        # CRITICAL: TaskManager state update - poses are already updated asynchronously by _sim_pose_callback
-        # No need to refresh - just update the state from current object dictionary
         self.get_logger().info(f'{arm}: Updating TAMP world state from current object poses...')
         self.task_manager.update_state_from_poses()
         
@@ -2241,7 +2129,7 @@ class DualPandaUnifiedNode(Node):
             return False
         
         # Verify object moved with gripper (sanity check)
-        time.sleep(0.2)  # Wait for pose updates
+        time.sleep(0.2)
         obj_pose_after_pick = self.get_pose(object_name)
         ee_data = self.get_ee_pose(arm)
         if obj_pose_after_pick and ee_data:
@@ -2281,14 +2169,12 @@ class DualPandaUnifiedNode(Node):
         assembly_pose = self._transform_to_robot_frame(world_assembly_pose, arm)
         assembly_pose.orientation = world_assembly_pose.orientation  # Keep original orientation
         
-        # CRITICAL: Set up planning scene BEFORE motion planning to ensure table and objects are known
         self.get_logger().info(f'{arm}: Setting up planning scene with table and all objects before assembly motion...')
         self._setup_planning_scene()  # Add table + all 6 objects
-        time.sleep(0.3)  # Wait for planning scene to be processed by MoveIt
+            time.sleep(0.3)
         
         self.get_logger().info(f'{arm}: Planning collision-free path to Assembly Pose (Hole facing -X)...')
         try:
-            # CRITICAL: Use collision-free path planning instead of direct IK execution
             # Direct IK only finds target joint angles - it doesn't plan a path or avoid obstacles!
             # Use Cartesian path planning (not OMPL) for simple, predictable straight-line movements
             assembly_joints = self.plan_to_pose(assembly_pose, arm=arm, add_waypoints=True, refresh_scene=False, use_ompl=False)
@@ -2312,10 +2198,9 @@ class DualPandaUnifiedNode(Node):
             else:
                 self.get_logger().warn(f'{arm}: No joint state available for J7 offset, skipping...')
             
-            # CRITICAL: Ensure gripper stays closed after motion (prevent accidental release)
             self.get_logger().info(f'{arm}: Ensuring gripper maintains grip on object...')
             self.send_gripper_goal(0.01, arm=arm)  # Re-close gripper to maintain grip
-            time.sleep(0.5)  # Brief wait to ensure gripper closes
+            time.sleep(0.5)
             
             return True
         except Exception as e:
@@ -2421,12 +2306,11 @@ class DualPandaUnifiedNode(Node):
             return False
         
         # 2. Retreat to Safe Position - Transform to robot base frame
-        # CRITICAL: Make safe retreat position adaptive based on which side the solid object is on
         # Green objects are on positive Y (right side), Red objects are on negative Y (left side)
         # Retreat to the SAME side to avoid cross-workspace movement that causes collisions
         
         # Get the solid object's current position (after picking) to determine which side it's on
-        time.sleep(0.1)  # Brief wait for pose updates after picking
+        time.sleep(0.1)
         solid_pose_data = self.get_pose(object_name)
         if solid_pose_data:
             solid_current_y = solid_pose_data['position'][1]
@@ -2463,7 +2347,6 @@ class DualPandaUnifiedNode(Node):
         safe_retreat_pose = self._transform_to_robot_frame(world_safe_retreat_pose, arm)
         safe_retreat_pose.orientation = world_safe_retreat_pose.orientation  # Keep original orientation
             
-        # 3. Get LIVE hollow object position from Gazebo (CRITICAL: Use live pose, not EE position)
         other_arm = 'panda2' if arm == 'panda1' else 'panda1'
         
         # Get the hollow object that Panda 2 is holding
@@ -2478,8 +2361,7 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().error(f'{arm} is not holding any object. Cannot perform insertion.')
             return False
         
-        # Get live poses from Gazebo - CRITICAL: Use live hollow position
-        time.sleep(0.2)  # Wait for pose updates
+        time.sleep(0.2)
         hollow_data = self.get_pose(hollow_name)
         solid_data = self.get_pose(solid_name)
         
@@ -2494,9 +2376,6 @@ class DualPandaUnifiedNode(Node):
         
         self.get_logger().info(f'{arm}: Hollow object LIVE position: X={hx:.3f}, Y={hy:.3f}, Z={hz:.3f}')
         
-        # ============================================================
-        # FRAME-BASED APPROACH: Compute poses using transform chain
-        # ============================================================
         self.get_logger().info(f'{arm}: Using frame-based approach to compute insertion poses (gap={self.pre_insert_gap*100:.1f}cm)...')
         
         # Compute pre-insert pose (30cm gap) using frame-based transforms
@@ -2557,14 +2436,13 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().info(f'{arm}: Using simpler insert pose: X={insert_pose.position.x:.3f}m')
         
         try:
-            # CRITICAL: Ensure ALL collision objects are in planning scene:
             # 1. All 6 objects (red_block, green_block, red_solid, green_solid, red_hollow, green_hollow)
             # 2. Table
             # 3. Hollow object held by Panda 2
             # 4. Both arms (automatic with unified MoveIt, but we ensure joint state is current)
             self.get_logger().info(f'{arm}: Setting up complete planning scene with all objects and table...')
             self._setup_planning_scene()  # Add all 6 objects + table
-            time.sleep(0.2)  # Wait for scene to be processed
+            time.sleep(0.2)
             
             # Add hollow object held by Panda 2 as a collision object
             self.get_logger().info(f'[COLLISION DEBUG] ====== COLLISION SETUP FOR INSERTION ======')
@@ -2572,7 +2450,7 @@ class DualPandaUnifiedNode(Node):
             self.get_logger().info(f'[COLLISION DEBUG] Hollow object: {hollow_name}, Solid object: {solid_name}')
             self.get_logger().info(f'[COLLISION DEBUG] Hollow position (live): X={hx:.3f}, Y={hy:.3f}, Z={hz:.3f}')
             self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)
-            time.sleep(0.2)  # Wait for planning scene to be processed
+            time.sleep(0.2)
             self.get_logger().info(f'[COLLISION DEBUG] Collision object published, waiting for MoveIt to process...')
             
             # Step 2a: Move to safe position (already transformed above) - OLD LOGIC: Direct IK
@@ -2581,9 +2459,8 @@ class DualPandaUnifiedNode(Node):
             self.send_joint_trajectory(joints_safe, arm=arm, seconds=3.0)
             
             # Step 3: Plan collision-free path from safe position to align in front of hole
-            # CRITICAL: Refresh planning scene before planning to ensure all objects are current
             # Re-read LIVE object poses to ensure we have the latest positions
-            time.sleep(0.2)  # Wait for pose updates
+            time.sleep(0.2)
             updated_hollow_data = self.get_pose(hollow_name)
             if updated_hollow_data:
                 hollow_data = updated_hollow_data  # Use updated pose
@@ -2610,12 +2487,11 @@ class DualPandaUnifiedNode(Node):
                 self.get_logger().error(f'[COLLISION DEBUG] WARNING: Cannot get fresh EE pose for {other_arm}! Using stale pose!')
             
             self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)  # Update held object
-            time.sleep(0.5)  # Wait for planning scene to be processed by MoveIt
+            time.sleep(0.5)
             
             # Step 3: Plan collision-free path from safe position to align in front of hole
-            # CRITICAL: Refresh planning scene before planning to ensure all objects are current
             # Re-read LIVE object poses to ensure we have the latest positions
-            time.sleep(0.2)  # Wait for pose updates
+            time.sleep(0.2)
             updated_hollow_data = self.get_pose(hollow_name)
             if updated_hollow_data:
                 hollow_data = updated_hollow_data  # Use updated pose
@@ -2623,7 +2499,7 @@ class DualPandaUnifiedNode(Node):
             
             self._setup_planning_scene()  # Refresh all objects with latest poses
             self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)  # Update held object
-            time.sleep(0.5)  # Wait for planning scene to be processed by MoveIt
+            time.sleep(0.5)
             
             self.get_logger().info(f'{arm}: Planning collision-free path around Panda 2 and hollow object...')
             self.get_logger().info(f'{arm}: Using unified joint state (both arms) for collision checking...')
@@ -2694,9 +2570,8 @@ class DualPandaUnifiedNode(Node):
             # Frame-based approach: Poses are already correctly aligned via transform chain
             # No manual alignment needed - trust the frame-based transforms
             self.get_logger().info(f'{arm}: Frame-based approach: Poses are automatically aligned via transform chain.')
-            time.sleep(0.3)  # Brief wait to ensure previous motion is complete
+            time.sleep(0.3)
             
-            # CRITICAL: Apply 45-degree J7 offset IMMEDIATELY after reaching pre-insert position
             # This must happen BEFORE any insertion calculations or movements
             self.get_logger().info(f'{arm}: Applying 45-degree J7 offset immediately after reaching pre-insert position...')
             j7_offset_applied = False
@@ -2715,7 +2590,7 @@ class DualPandaUnifiedNode(Node):
                     
                     self.get_logger().info(f'{arm}: Applying J7 offset: {old_j7:.3f} rad -> {new_joints[6]:.3f} rad (+45 deg)')
                     self.send_joint_trajectory(new_joints, arm=arm, seconds=1.5)
-                    time.sleep(1.0)  # Wait for rotation to complete
+                    time.sleep(1.0)
                     
                     # Verify the offset was applied
                     if self.joint_state:
@@ -2741,17 +2616,15 @@ class DualPandaUnifiedNode(Node):
             else:
                 self.get_logger().info(f'{arm}: J7 offset successfully applied. Ready for insertion calculations.')
             
-            time.sleep(0.3)  # Brief wait after J7 offset
+            time.sleep(0.3)
             
             # Step 4: Move forward using frame-based insert pose - OLD INCREMENTAL LOGIC
-            # CRITICAL: Refresh planning scene right before insertion to ensure latest obstacle positions
             self.get_logger().info(f'{arm}: Refreshing planning scene before insertion...')
             time.sleep(0.1)
             updated_hollow_data = self.get_pose(hollow_name)
             if updated_hollow_data:
                 hollow_data = updated_hollow_data
                 
-                # CRITICAL: Update insert pose to account for actual yaw difference between solid and hollow
                 # Get current solid yaw (from pose or initial config)
                 solid_yaw = solid_data.get('rpy', [0.0, 0.0, solid_data.get('yaw', 0.0)])[2]
                 hollow_yaw = hollow_data.get('rpy', [0.0, 0.0, hollow_data.get('yaw', 0.0)])[2]
@@ -2771,7 +2644,7 @@ class DualPandaUnifiedNode(Node):
             
             self._setup_planning_scene()  # Refresh all objects
             self._add_held_object_as_collision(other_arm, hollow_name, hollow_data)  # Update held object
-            time.sleep(0.3)  # Wait for planning scene to be processed
+            time.sleep(0.3)
             
             # Get current pose for Cartesian path starting point (AFTER J7 offset)
             current_ee_data = self.get_ee_pose(arm)
@@ -2789,14 +2662,12 @@ class DualPandaUnifiedNode(Node):
                 current_ee_pose_world.orientation.z = qz
                 current_ee_pose_world.orientation.w = qw
                 current_ee_pose_robot = self._transform_to_robot_frame(current_ee_pose_world, arm)
-                # CRITICAL: Use the actual orientation AFTER J7 rotation (includes the 45deg offset)
                 current_ee_pose_robot.orientation = current_ee_pose_world.orientation
             
             # Use frame-based insert pose (already computed with correct yaw alignment and 20cm insertion depth)
             self.get_logger().info(f'{arm}: Using frame-based insert pose: X={insert_pose.position.x:.3f}, Y={insert_pose.position.y:.3f}, Z={insert_pose.position.z:.3f}')
             self.get_logger().info(f'{arm}: Current position after J7 offset: X={current_ee_pose_robot.position.x:.3f}, Y={current_ee_pose_robot.position.y:.3f}, Z={current_ee_pose_robot.position.z:.3f}')
             
-            # CRITICAL: Break insertion into smaller increments to avoid obstacles - OLD INCREMENTAL LOGIC
             # Cartesian paths can only go straight, so we'll move forward in smaller steps
             # Calculate initial distance to target
             dx = insert_pose.position.x - current_ee_pose_robot.position.x
@@ -2840,7 +2711,6 @@ class DualPandaUnifiedNode(Node):
                 next_pose.position.x = current_pose.position.x + direction_x * step_distance
                 next_pose.position.y = current_pose.position.y + direction_y * step_distance
                 next_pose.position.z = current_pose.position.z + direction_z * step_distance
-                # CRITICAL: Use current orientation (which includes J7 offset) instead of insert_pose orientation
                 # This preserves the 45-degree J7 rotation throughout the linear movement
                 next_pose.orientation = current_pose.orientation  # Keep current orientation (includes J7 offset)
                 
@@ -2867,7 +2737,6 @@ class DualPandaUnifiedNode(Node):
                             current_pose_world.orientation.z = qz
                             current_pose_world.orientation.w = qw
                             current_pose = self._transform_to_robot_frame(current_pose_world, arm)
-                            # CRITICAL: Use actual current orientation (which includes J7 offset) instead of overwriting
                             current_pose.orientation = current_pose_world.orientation  # Keep current orientation (includes J7 offset)
                             
                             # Recalculate remaining distance from current position
@@ -2899,7 +2768,6 @@ class DualPandaUnifiedNode(Node):
                                 current_pose_world.orientation.z = qz
                                 current_pose_world.orientation.w = qw
                                 current_pose = self._transform_to_robot_frame(current_pose_world, arm)
-                                # CRITICAL: Use actual current orientation (which includes J7 offset)
                                 current_pose.orientation = current_pose_world.orientation  # Keep current orientation (includes J7 offset)
                                 # Recalculate remaining distance
                                 dx = insert_pose.position.x - current_pose.position.x
@@ -2967,7 +2835,6 @@ class DualPandaUnifiedNode(Node):
             insert_pose.position.z += alignment_offset_z_DEAD
             self.get_logger().info(f'{arm}: Adjusted insert pose: Y={insert_pose.position.y:.3f} ({alignment_offset_y*100:.1f}cm), Z={insert_pose.position.z:.3f} (+{alignment_offset_z*100:.1f}cm)')
             
-            # CRITICAL: Break insertion into smaller increments to avoid obstacles
             # Cartesian paths can only go straight, so we'll move forward in smaller steps
             # Calculate initial distance to target (after alignment offsets)
             dx = insert_pose.position.x - current_ee_pose_robot.position.x
@@ -3011,7 +2878,6 @@ class DualPandaUnifiedNode(Node):
                 next_pose.position.x = current_pose.position.x + direction_x * step_distance
                 next_pose.position.y = current_pose.position.y + direction_y * step_distance
                 next_pose.position.z = current_pose.position.z + direction_z * step_distance
-                # CRITICAL: Use current orientation (which includes J7 offset) instead of insert_pose orientation
                 # This preserves the 45-degree J7 rotation throughout the linear movement
                 next_pose.orientation = current_pose.orientation  # Keep current orientation (includes J7 offset)
                 
@@ -3020,9 +2886,8 @@ class DualPandaUnifiedNode(Node):
                 if iteration % 5 == 0:
                     self.get_logger().info(f'{arm}: Refreshing planning scene (step {iteration+1})...')
                     self._setup_planning_scene(use_live_poses=True)
-                    time.sleep(0.1)  # Brief wait
+                    time.sleep(0.1)
                 
-                # CRITICAL: Use Cartesian path planning (straight-line) for insertion - NOT OMPL!
                 # OMPL finds curved paths through joint space which causes arm reconfigurations and rotation
                 # For insertion, we need straight-line movement with fixed orientation
                 try:
@@ -3052,7 +2917,6 @@ class DualPandaUnifiedNode(Node):
                         current_pose_world.orientation.z = qz
                         current_pose_world.orientation.w = qw
                         current_pose = self._transform_to_robot_frame(current_pose_world, arm)
-                        # CRITICAL: Use actual current orientation (which includes J7 offset) instead of overwriting
                         current_pose.orientation = current_pose_world.orientation  # Keep current orientation (includes J7 offset)
                         
                         # Recalculate remaining distance from current position
@@ -3137,7 +3001,6 @@ class DualPandaUnifiedNode(Node):
         dy = world_pose.position.y - robot['y']
         dz = world_pose.position.z - robot['z']
         
-        # Rotate (inverse of robot yaw)
         cos_yaw = math.cos(-robot['yaw'])
         sin_yaw = math.sin(-robot['yaw'])
         
@@ -3222,14 +3085,6 @@ class DualPandaUnifiedNode(Node):
             time.sleep(0.05)
         self.get_logger().info(f'[COLLISION DEBUG] ✓ Published {object_name} held by {arm} as collision object at ({ee_x:.3f}, {ee_y:.3f}, {ee_z:.3f}) - MoveIt should now avoid this object')
     
-    # ============================================================
-    # TODO: Copy remaining methods from dual_arm_gui.py with these changes:
-    # 1. Replace namespaced service calls with unified ones
-    # 2. Add group_name parameter to MoveIt requests
-    # 3. Use prefixed joint names throughout
-    # 4. Use unified planning_scene_pub
-    # 5. No need to manually publish collision objects for other arm!
-    # ============================================================
 
 
 class DualPandaUnifiedGUI:
@@ -3239,12 +3094,10 @@ class DualPandaUnifiedGUI:
         rclpy.init()
         self.node = DualPandaUnifiedNode()
         
-        # CRITICAL: Spin node a few times IMMEDIATELY to register subscriptions
-        # This ensures /objects_poses_sim subscription is active before background thread starts
-        self.node.get_logger().info('[CRITICAL] Doing initial spins to register /objects_poses_sim subscription...')
+        self.node.get_logger().info('Doing initial spins to register /objects_poses_sim subscription...')
         for _ in range(10):
             rclpy.spin_once(self.node, timeout_sec=0.1)
-        self.node.get_logger().info('[CRITICAL] ✓ Initial spins complete - subscriptions should be registered!')
+        self.node.get_logger().info('Initial spins complete - subscriptions should be registered!')
         
         # Start ROS node in background thread for continuous spinning
         self.ros_thread = threading.Thread(target=self._ros_spin, daemon=True)
@@ -3833,7 +3686,7 @@ def _euler_to_quaternion(roll: float, pitch: float, yaw: float) -> Tuple[float, 
 
 
 def _quaternion_multiply(q1: Tuple[float, float, float, float], q2: Tuple[float, float, float, float]) -> Tuple[float, float, float, float]:
-    """Multiply two quaternions: q_result = q1 * q2."""
+    """Multiply two quaternions."""
     w1, x1, y1, z1 = q1[3], q1[0], q1[1], q1[2]
     w2, x2, y2, z2 = q2[3], q2[0], q2[1], q2[2]
     
@@ -3846,15 +3699,12 @@ def _quaternion_multiply(q1: Tuple[float, float, float, float], q2: Tuple[float,
 
 
 def _quaternion_rotate_vector(q: Tuple[float, float, float, float], v: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    """Rotate a vector by a quaternion: v_rotated = q * v * q^-1."""
+    """Rotate a vector by a quaternion."""
     x, y, z, w = q[0], q[1], q[2], q[3]
     vx, vy, vz = v[0], v[1], v[2]
     
-    # Convert vector to quaternion (pure quaternion: w=0)
     v_quat = (vx, vy, vz, 0.0)
-    q_inv = (-x, -y, -z, w)  # Quaternion inverse (conjugate for unit quaternion)
-    
-    # Rotate: q * v * q^-1
+    q_inv = (-x, -y, -z, w)
     temp = _quaternion_multiply((x, y, z, w), v_quat)
     result = _quaternion_multiply(temp, q_inv)
     
@@ -3862,37 +3712,23 @@ def _quaternion_rotate_vector(q: Tuple[float, float, float, float], v: Tuple[flo
 
 
 def _compose_transforms(pose1: Pose, pose2: Pose) -> Pose:
-    """
-    Compose two transforms: result = pose1 * pose2
-    
-    Given:
-    - pose1: Transform from frame A to frame B
-    - pose2: Transform from frame B to frame C
-    
-    Returns:
-    - result: Transform from frame A to frame C
-    """
+    """Compose two transforms."""
     result = Pose()
     
     # Extract quaternions
     q1 = (pose1.orientation.x, pose1.orientation.y, pose1.orientation.z, pose1.orientation.w)
     q2 = (pose2.orientation.x, pose2.orientation.y, pose2.orientation.z, pose2.orientation.w)
     
-    # Compose orientations: q_result = q1 * q2
     q_result = _quaternion_multiply(q1, q2)
     result.orientation.x = q_result[0]
     result.orientation.y = q_result[1]
     result.orientation.z = q_result[2]
     result.orientation.w = q_result[3]
     
-    # Compose positions: p_result = p1 + R1 * p2
     p1 = (pose1.position.x, pose1.position.y, pose1.position.z)
     p2 = (pose2.position.x, pose2.position.y, pose2.position.z)
     
-    # Rotate p2 by q1
     p2_rotated = _quaternion_rotate_vector(q1, p2)
-    
-    # Add rotated p2 to p1
     result.position.x = p1[0] + p2_rotated[0]
     result.position.y = p1[1] + p2_rotated[1]
     result.position.z = p1[2] + p2_rotated[2]
@@ -3901,21 +3737,9 @@ def _compose_transforms(pose1: Pose, pose2: Pose) -> Pose:
 
 
 def _apply_transform(transform: Pose, point: Tuple[float, float, float]) -> Tuple[float, float, float]:
-    """
-    Apply a transform to a point: result_point = transform * point
-    
-    Args:
-        transform: Pose representing the transform
-        point: (x, y, z) tuple
-    
-    Returns:
-        Transformed point as (x, y, z) tuple
-    """
-    # Rotate the point
+    """Apply a transform to a point."""
     q = (transform.orientation.x, transform.orientation.y, transform.orientation.z, transform.orientation.w)
     rotated_point = _quaternion_rotate_vector(q, point)
-    
-    # Translate
     result = (
         transform.position.x + rotated_point[0],
         transform.position.y + rotated_point[1],
@@ -3939,22 +3763,15 @@ def _pose_from_position_quaternion(pos: Tuple[float, float, float], quat: Tuple[
 
 
 def _invert_transform(transform: Pose) -> Pose:
-    """
-    Invert a transform: result = transform^-1
-    
-    For a transform T = [R, p], the inverse is T^-1 = [R^T, -R^T * p]
-    """
+    """Invert a transform."""
     result = Pose()
     
-    # Invert quaternion (conjugate for unit quaternion)
     q = (transform.orientation.x, transform.orientation.y, transform.orientation.z, transform.orientation.w)
     q_inv = (-q[0], -q[1], -q[2], q[3])
     result.orientation.x = q_inv[0]
     result.orientation.y = q_inv[1]
     result.orientation.z = q_inv[2]
     result.orientation.w = q_inv[3]
-    
-    # Invert position: -R^T * p
     p = (transform.position.x, transform.position.y, transform.position.z)
     p_rotated = _quaternion_rotate_vector(q_inv, p)
     result.position.x = -p_rotated[0]

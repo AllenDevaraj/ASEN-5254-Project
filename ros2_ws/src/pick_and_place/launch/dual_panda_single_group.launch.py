@@ -1,35 +1,6 @@
 #!/usr/bin/env python3
 
-"""
-Unified launch file for dual Panda robots with a SINGLE MoveIt move_group.
-This is a parallel implementation to dual_panda_complete.launch.py that uses a single
-move_group instead of two separate namespaced move_groups.
-
-COMPARISON TO ORIGINAL (dual_panda_complete.launch.py):
-- SAME: Uses same dual_panda_demo.launch.py for simulation
-- SAME: Same bridge_objects_global setup for ground truth poses
-- SAME: Same MoveItConfigsBuilder pattern and parameters
-- SAME: Same GUI execution pattern (ExecuteProcess)
-- DIFFERENT: Single move_group (no namespace) vs two namespaced move_groups
-- DIFFERENT: Uses dual_panda.srdf with panda1_arm/panda2_arm groups
-- DIFFERENT: Requires unified robot_description with prefixed links (TODO)
-
-STATUS: 
-This is a WORK-IN-PROGRESS. The structure follows the same patterns as the original,
-but requires additional components (unified URDF generation, joint state merger) to
-fully function. The dual_panda.srdf expects prefixed links (panda1_link0, panda2_link0)
-but the current URDF uses unprefixed names (panda_link0).
-
-To complete this setup:
-1. Generate unified URDF combining both pandas with prefixed names
-2. Create joint state merger node that prefixes joint names
-3. Update controllers to handle prefixed joint names
-
-Launches:
-- Dual Panda simulation in Gazebo (same as original)
-- Single move_group with unified SRDF (instead of two separate ones)
-- Unified GUI for controlling both arms (same structure, different service calls)
-"""
+"""Unified launch file for dual Panda robots with single MoveIt move_group."""
 
 import os
 import xacro
@@ -48,10 +19,7 @@ from moveit_configs_utils import MoveItConfigsBuilder
 
 
 def prefix_urdf_elements(urdf_root, prefix):
-    """
-    Prefix all links and joints in a URDF root element.
-    Updates references throughout the URDF.
-    """
+    """Prefix all links and joints in a URDF root element."""
     link_map = {}
     joint_map = {}
     
@@ -121,9 +89,7 @@ def prefix_urdf_elements(urdf_root, prefix):
 
 
 def combine_urdfs(panda1_root, panda2_root):
-    """
-    Combine two URDF root elements into a single unified URDF.
-    """
+    """Combine two URDF root elements into a single unified URDF."""
     # Create new root
     combined = ET.Element('robot')
     combined.set('name', 'dual_panda')
@@ -189,10 +155,7 @@ def combine_urdfs(panda1_root, panda2_root):
 
 
 def generate_unified_robot_description():
-    """
-    Generate a unified robot_description by combining both Panda URDFs with prefixes.
-    Returns ParameterValue containing the unified URDF string.
-    """
+    """Generate a unified robot_description by combining both Panda URDFs with prefixes."""
     panda_ign_desc_dir = get_package_share_directory('panda_ign_description')
     panda_urdf_file = os.path.join(panda_ign_desc_dir, 'urdf', 'panda_sim.urdf.xacro')
     controllers_file = os.path.join(panda_ign_desc_dir, 'config', 'panda_dual_controllers.yaml')
@@ -315,11 +278,7 @@ def generate_unified_robot_description():
     if '<robot name="dual_panda">' not in unified_urdf_string and '<robot name="dual_panda"' not in unified_urdf_string:
         raise ValueError("Unified URDF missing robot root element!")
     
-    # =========================================================================
-    # CRITICAL FIX: Replace Gazebo mesh URIs with package:// URIs for MoveIt
-    # Gazebo uses "model://panda/meshes/..." which MoveIt can't resolve
-    # MoveIt needs "package://panda_ign_description/panda/meshes/..."
-    # =========================================================================
+    # Replace Gazebo mesh URIs with package:// URIs for MoveIt
     print("[URDF GEN] Fixing mesh paths for MoveIt collision geometry...")
     
     # Count meshes before fix
