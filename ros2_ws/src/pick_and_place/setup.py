@@ -24,9 +24,7 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
-        (os.path.join('share', package_name, 'launch'), glob('launch/*.py')),
         (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
-        (os.path.join('share', package_name, 'worlds'), glob('worlds/*.world')),
     ] + model_files,
     install_requires=['setuptools'],
     zip_safe=True,
@@ -37,12 +35,6 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'controller = pick_and_place.controller:main',
-            'panda_ik_gui = pick_and_place.gui_end_effector:main',
-            'panda1_ik_gui = pick_and_place.gui_end_effector:panda1_main',
-            'panda2_ik_gui = pick_and_place.gui_end_effector:panda2_main',
-            'dual_arm_gui = pick_and_place.dual_arm_gui:main',
-            'clean_pick_place = pick_and_place.clean_pick_place:main',
             'joint_state_combiner = pick_and_place.joint_state_combiner:main',
         ],
     },

@@ -1,6 +1,0 @@
-#!/usr/bin/env python3
-from pick_and_place.gui_end_effector import main
-
-if __name__ == '__main__':
-    main()
-

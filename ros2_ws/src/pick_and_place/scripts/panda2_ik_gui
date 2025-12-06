@@ -1,8 +1,0 @@
-#!/usr/bin/env python3
-from pick_and_place.gui_end_effector import panda2_main
-
-
-if __name__ == '__main__':
-    panda2_main()
-
-
