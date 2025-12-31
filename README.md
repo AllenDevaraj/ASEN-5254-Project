@@ -46,24 +46,24 @@ sudo apt install ros-humble-moveit \
                  ros-humble-ros-gz \
                  ros-humble-ros2-control \
                  ros-humble-ros2-controllers \
-                 python3-tk  # For the custom GUI
+                 python3-tk
 ```
 
 -----
 
 ## 🛠️ Installation
 
-1.  **Create a ROS 2 Workspace:**
+1.  **Clone the Repository:**
 
     ```bash
-    mkdir -p ~/tamp_ws/src
-    cd ~/tamp_ws/src
+    git clone https://github.com/AllenDevaraj/ASEN-5254-Project.git
+    cd ASEN-5254-Project
     ```
 
-2.  **Clone the Repository:**
+2.  **Navigate to the ROS 2 Workspace:**
 
     ```bash
-    git clone https://github.com/YOUR_USERNAME/dual_arm_tamp.git .
+    cd ros2_ws
     ```
 
 3.  **Install Python Dependencies:**
@@ -75,7 +75,6 @@ sudo apt install ros-humble-moveit \
 4.  **Build the Workspace:**
 
     ```bash
-    cd ~/tamp_ws
     colcon build --symlink-install
     source install/setup.bash
     ```
