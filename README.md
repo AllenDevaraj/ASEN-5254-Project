@@ -24,10 +24,6 @@ The system autonomously:
 
 3.  **Executes cooperation:** Performs a frame-based "peg-in-hole" insertion where one arm stabilizes the receptacle while the other inserts the peg, regardless of the receptacle's orientation.
 
-### 🎥 Demo
-
-*(Place your GIF or link to YouTube video here)*
-
 ---
 
 ## ⚙️ Prerequisites
@@ -45,19 +41,12 @@ The system autonomously:
 Ensure you have the following ROS 2 packages installed:
 
 ```bash
-
 sudo apt update
-
 sudo apt install ros-humble-moveit \
-
                  ros-humble-ros-gz \
-
                  ros-humble-ros2-control \
-
                  ros-humble-ros2-controllers \
-
                  python3-tk  # For the custom GUI
-
 ```
 
 -----
@@ -67,39 +56,28 @@ sudo apt install ros-humble-moveit \
 1.  **Create a ROS 2 Workspace:**
 
     ```bash
-
     mkdir -p ~/tamp_ws/src
-
     cd ~/tamp_ws/src
-
     ```
 
 2.  **Clone the Repository:**
 
     ```bash
-
-    git clone [https://github.com/YOUR_USERNAME/dual_arm_tamp.git](https://github.com/YOUR_USERNAME/dual_arm_tamp.git) .
-
+    git clone https://github.com/YOUR_USERNAME/dual_arm_tamp.git .
     ```
 
 3.  **Install Python Dependencies:**
 
     ```bash
-
     pip3 install scipy numpy
-
     ```
 
 4.  **Build the Workspace:**
 
     ```bash
-
     cd ~/tamp_ws
-
     colcon build --symlink-install
-
     source install/setup.bash
-
     ```
 
 -----
@@ -111,9 +89,7 @@ The entire system (Simulation, MoveIt, Perception, and GUI) is orchestrated by a
 ### 1\. Launch the System
 
 ```bash
-
 ros2 launch pick_and_place dual_panda_single_group.launch.py
-
 ```
 
 ### 2\. Using the Control GUI
@@ -164,34 +140,22 @@ This allows the system to insert the peg successfully even if the holding arm is
 
 ## 📂 Project Structure
 
-```text
-
+```
 .
-
 ├── config/                 # SRDF, Kinematics, and MoveIt configs
-
 ├── launch/
-
 │   └── dual_panda_single_group.launch.py  # Master launch file
-
 ├── models/                 # SDF models (tables, blocks, pegs)
-
 ├── src/
-
 │   ├── task_manager.py     # Symbolic planning logic
-
 │   ├── gui_control.py      # Tkinter interface
-
 │   └── perception_bridge.py # Sim-to-Real pose converter
-
 ├── urdf/                   # Unified dual-arm description
-
 └── README.md
-
 ```
 
 -----
 
 ## 📄 License
 
-[MIT License](https://www.google.com/search?q=LICENSE)
+MIT License
