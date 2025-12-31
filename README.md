@@ -27,7 +27,7 @@ The system autonomously:
 ---
 
 ## Demo
-<YouTube video link here>
+YouTube video link here...
 
 ## ⚙️ Prerequisites
 
@@ -137,31 +137,6 @@ The insertion logic uses a relative frame chain:
 `World -> Hollow_Object -> Insertion_Frame -> Solid_Object -> Gripper`
 
 This allows the system to insert the peg successfully even if the holding arm is positioned at an arbitrary angle.
-
------
-
-## 📂 Project Structure
-
-```
-.
-├── README.md
-└── ros2_ws/                # ROS 2 workspace
-    └── src/
-        ├── moveit_resources/           # MoveIt resource packages
-        ├── panda_ign_description/      # Panda robot description for Gazebo
-        ├── pick_and_place/             # Main pick and place package
-        │   ├── launch/
-        │   │   └── dual_panda_single_group.launch.py  # Master launch file
-        │   ├── models/                 # SDF models (tables, blocks, pegs)
-        │   ├── pick_and_place/         # Python package
-        │   │   ├── task_manager.py     # Symbolic planning logic
-        │   │   ├── dual_arm_single_group_gui.py  # Tkinter GUI interface
-        │   │   └── joint_state_combiner.py
-        │   ├── worlds/                 # Gazebo world files
-        │   ├── package.xml
-        │   └── setup.py
-        └── pick_and_place_msgs/        # Custom message definitions
-```
 
 -----
 
