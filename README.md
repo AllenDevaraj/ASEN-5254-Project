@@ -26,6 +26,9 @@ The system autonomously:
 
 ---
 
+## Demo
+<YouTube video link here>
+
 ## ⚙️ Prerequisites
 
 * **OS:** Ubuntu 22.04 LTS (Jammy Jellyfish)
@@ -141,16 +144,23 @@ This allows the system to insert the peg successfully even if the holding arm is
 
 ```
 .
-├── config/                 # SRDF, Kinematics, and MoveIt configs
-├── launch/
-│   └── dual_panda_single_group.launch.py  # Master launch file
-├── models/                 # SDF models (tables, blocks, pegs)
-├── src/
-│   ├── task_manager.py     # Symbolic planning logic
-│   ├── gui_control.py      # Tkinter interface
-│   └── perception_bridge.py # Sim-to-Real pose converter
-├── urdf/                   # Unified dual-arm description
-└── README.md
+├── README.md
+└── ros2_ws/                # ROS 2 workspace
+    └── src/
+        ├── moveit_resources/           # MoveIt resource packages
+        ├── panda_ign_description/      # Panda robot description for Gazebo
+        ├── pick_and_place/             # Main pick and place package
+        │   ├── launch/
+        │   │   └── dual_panda_single_group.launch.py  # Master launch file
+        │   ├── models/                 # SDF models (tables, blocks, pegs)
+        │   ├── pick_and_place/         # Python package
+        │   │   ├── task_manager.py     # Symbolic planning logic
+        │   │   ├── dual_arm_single_group_gui.py  # Tkinter GUI interface
+        │   │   └── joint_state_combiner.py
+        │   ├── worlds/                 # Gazebo world files
+        │   ├── package.xml
+        │   └── setup.py
+        └── pick_and_place_msgs/        # Custom message definitions
 ```
 
 -----
