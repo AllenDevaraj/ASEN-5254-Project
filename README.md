@@ -1,145 +1,60 @@
-# Dual-Arm Cooperative Manipulation using TAMP
+# Dual-Arm Peg-in-Hole with Task and Motion Planning
 
-![ROS2 Humble](https://img.shields.io/badge/ROS2-Humble-blue)
+![ROS 2 Humble](https://img.shields.io/badge/ROS2-Humble-blue) ![MoveIt 2](https://img.shields.io/badge/MoveIt-2-orange) ![Gazebo Fortress](https://img.shields.io/badge/Ignition-Fortress-red) ![Python 3.10+](https://img.shields.io/badge/Python-3.10+-yellow)
 
-![MoveIt 2](https://img.shields.io/badge/MoveIt-2-orange)
+Two Franka Emika Panda arms work together in Gazebo to insert a peg into a hollow block. A symbolic task planner decides *what* to do, such as clearing a block that sits on top of the target first. MoveIt then plans *how* each arm moves.
 
-![Gazebo](https://img.shields.io/badge/Ignition-Fortress-red)
+![Task plan for one run: unstack, put down, pick up, insert](docs/figure/tamp.gif)
 
-![Python](https://img.shields.io/badge/Python-3.10+-yellow)
+In this run, Panda 2 lifts the blue block off `green_hollow`, puts it down, and picks up `green_hollow`. Panda 1 then inserts `red_solid` into it.
 
-**Author:** Allen Devaraj Augustin Ponraj  
+ASEN 5254 Algorithmic Motion Planning, University of Colorado Boulder. Author: Allen Devaraj Augustin Ponraj.
 
-**Affiliation:** University of Colorado Boulder, Dept. of Aerospace Engineering Sciences
+## How it works
 
-## 📖 Overview
+- **Task planning:** `task_manager.py` stores the world state as predicates (`on`, `on_table`, `clear`, `holding`, `hand_empty`). From that state it builds a plan of actions (`unstack`, `put_down`, `pick_up`) that gets the hollow block into the holding arm's gripper. If the hollow block is not clear, the plan removes whatever is on it first. The insertion then runs as its own step.
+- **Motion planning:** RRTConnect (OMPL, through MoveIt) moves the arms around obstacles. A Cartesian path does the final straight-line insertion.
+- **Insertion frames:** the peg's target pose is computed through the chain `World → hollow block → insertion frame → peg → gripper`. This lets the insertion work at whatever angle the holding arm presents the block.
+- **Object poses:** taken from Gazebo ground truth through `ros_gz_bridge`.
 
-This project implements a **Task and Motion Planning (TAMP)** framework for a dual-arm robotic system. Two Franka Emika Panda arms coordinate to perform a multi-stage assembly task in a cluttered, unstructured environment.
+## Requirements
 
-The system autonomously:
-
-1.  **Reasons symbolically:** Detects if objects are stacked and plans "unstacking" operations before attempting retrieval.
-
-2.  **Plans motions:** Utilizes a hybrid approach combining **RRTConnect** (for global obstacle avoidance) and **Cartesian Interpolation** (for precise insertion).
-
-3.  **Executes cooperation:** Performs a frame-based "peg-in-hole" insertion where one arm stabilizes the receptacle while the other inserts the peg, regardless of the receptacle's orientation.
-
----
-
-## Demo
-YouTube video link here...
-
-## ⚙️ Prerequisites
-
-* **OS:** Ubuntu 22.04 LTS (Jammy Jellyfish)
-
-* **Middleware:** ROS 2 Humble Hawksbill
-
-* **Simulation:** Ignition Gazebo Fortress (6.17.0+)
-
-* **Motion Planning:** MoveIt 2
-
-### System Dependencies
-
-Ensure you have the following ROS 2 packages installed:
+Ubuntu 22.04, ROS 2 Humble, Ignition Gazebo Fortress (6.17+) and MoveIt 2.
 
 ```bash
-sudo apt update
-sudo apt install ros-humble-moveit \
-                 ros-humble-ros-gz \
-                 ros-humble-ros2-control \
-                 ros-humble-ros2-controllers \
-                 python3-tk
+sudo apt install ros-humble-moveit ros-humble-ros-gz ros-humble-ros2-control \
+                 ros-humble-ros2-controllers python3-tk
+pip3 install scipy numpy
 ```
 
------
-
-## 🛠️ Installation
-
-1.  **Clone the Repository:**
-
-    ```bash
-    git clone https://github.com/AllenDevaraj/ASEN-5254-Project.git
-    cd ASEN-5254-Project
-    ```
-
-2.  **Navigate to the ROS 2 Workspace:**
-
-    ```bash
-    cd ros2_ws
-    ```
-
-3.  **Install Python Dependencies:**
-
-    ```bash
-    pip3 install scipy numpy
-    ```
-
-4.  **Build the Workspace:**
-
-    ```bash
-    colcon build --symlink-install
-    source install/setup.bash
-    ```
-
------
-
-## 🚀 Usage
-
-The entire system (Simulation, MoveIt, Perception, and GUI) is orchestrated by a single launch file.
-
-### 1\. Launch the System
+## Build and run
 
 ```bash
+git clone https://github.com/AllenDevaraj/ASEN-5254-Project.git
+cd ASEN-5254-Project/ros2_ws
+colcon build --symlink-install
+source install/setup.bash
 ros2 launch pick_and_place dual_panda_single_group.launch.py
 ```
 
-### 2\. Using the Control GUI
+The launch file starts Gazebo, MoveIt and the **Unified Dual Panda Control** window. In that window:
 
-Once the simulation loads, the **Dual Panda Control** interface will appear.
+1. Under **Global Controls**, click **Move Both to Neutral**.
+2. Under **Dual Arm Tasks**, choose the peg for Panda 1 (inserter) and the hollow block for Panda 2 (holder).
+3. Click **Insert Prep**. The task planner runs, and Panda 2 clears and picks up the hollow block.
+4. Click **Insert**. Panda 1 carries out the Cartesian approach and inserts the peg.
 
-  * **Live Monitor:** Check the right-hand panel to ensure "Ground Truth" poses are being received from Gazebo.
+The **Panda 1** and **Panda 2** panels move each arm on its own (**Move** or **Plan Only**). The **Live Monitor** shows the live end-effector poses.
 
-  * **Manual Control:** Use the "Panda 1" and "Panda 2" panels to test IK solutions (Move/Plan Only).
+## Layout
 
-  * **Run the Task:**
+```
+ros2_ws/src/pick_and_place/         launch file, control GUI, task planner, Gazebo models
+ros2_ws/src/panda_ign_description/  Panda URDF, controllers, world
+ros2_ws/src/pick_and_place_msgs/    message definitions
+docs/figure/                        README figure
+```
 
-    1.  Select **Global Controls** -\> `Move Both to Neutral`.
+## License
 
-    2.  In the **Dual Arm Tasks** section:
-
-          * Select the target objects (e.g., `red_hollow` and `red_solid`).
-
-          * Click **"Insert Prep"**: This triggers the TAMP solver. The robot will automatically unstack blocking objects if necessary.
-
-          * Click **"Insert"**: Executes the final Cartesian approach and insertion.
-
------
-
-## 🧩 Architecture
-
-### Hierarchical TAMP Pipeline
-
-  * **Perception:** `ros_gz_bridge` provides ground-truth poses to a `PerceptionOracle` node.
-
-  * **Symbolic State:** The `TaskManager` maintains predicates (e.g., `ON(A, B)`, `HOLDING(Arm, A)`) to generate high-level plans.
-
-  * **Geometric Planning:**
-
-      * **Transport Phase:** RRTConnect (OMPL) for collision-free travel.
-
-      * **Insertion Phase:** Jacobian-based Cartesian path planning for linear motion.
-
-### Coordinate Frames
-
-The insertion logic uses a relative frame chain:
-
-`World -> Hollow_Object -> Insertion_Frame -> Solid_Object -> Gripper`
-
-This allows the system to insert the peg successfully even if the holding arm is positioned at an arbitrary angle.
-
------
-
-## 📄 License
-
-MIT License
+MIT
